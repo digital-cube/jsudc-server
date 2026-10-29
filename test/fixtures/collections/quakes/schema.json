@@ -1,0 +1,21 @@
+{
+  "version": "v1",
+  "core_fields": [],
+  "fields": {
+    "mag": { "type": "decimal", "description": "Magnitude" },
+    "place": { "type": "string" },
+    "time": { "type": "datetime", "description": "Origin time (USGS sends epoch milliseconds)" },
+    "depth": { "type": "decimal", "description": "Kilometres below sea level" },
+    "lat": { "type": "decimal", "min": -90, "max": 90 },
+    "lng": { "type": "decimal", "min": -180, "max": 180 },
+    "alert": {
+      "type": "enum",
+      "values": ["green", "yellow", "orange", "red"],
+      "description": "PAGER alert level; empty for most events"
+    },
+    "status": { "type": "enum", "values": ["automatic", "reviewed", "deleted"] },
+    "type": { "type": "string", "description": "earthquake, quarry blast, explosion…" },
+    "url": { "type": "string" }
+  },
+  "field_order": ["mag", "place", "time", "depth", "alert", "status", "type", "lat", "lng", "url"]
+}

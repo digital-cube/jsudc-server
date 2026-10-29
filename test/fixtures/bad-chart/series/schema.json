@@ -1,0 +1,1 @@
+{"version":"v1","fields":{"ts":{"type":"datetime"},"host":{"type":"string"},"cpu":{"type":"decimal"}}}

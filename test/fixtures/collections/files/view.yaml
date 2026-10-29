@@ -1,0 +1,47 @@
+# files — the entries of one folder of `tree/` (source.yaml), read-only.
+# Click a folder (or ..) to open it: the folder is a `path eq` condition in
+# the URL filter, so a link to a subfolder works on reload. Search and chips
+# apply inside the open folder.
+default_renderer: table
+available_renderers: [table, cards]
+pagination: infinite
+page_size_default: 100
+row_height: 36
+
+folder_options:
+  path_field: path
+  kind_field: kind
+  dir_value: dir
+  label_field: name
+  preview: true
+
+search:
+  fields: [name]
+  placeholder: "Search this folder…"
+
+filters:
+  - field: ext
+    kind: select
+    options: [md, json, csv, png, txt]
+
+filterable:
+  fields: [name, kind, ext, size, mtime]
+
+columns:
+  - {field: name, pin: left, width: 300}
+  - {field: kind, width: 100, render: badge, render_options: {map: {dir: info, file: muted}}}
+  - {field: ext, width: 90, color: muted}
+  - {field: size, width: 110, align: right, render: bytes}
+  - {field: mtime, width: 170, transform: "date_format:DD.MM.YYYY HH:mm", color: muted}
+
+card_options:
+  title_field: name
+  subtitle_field: ext
+  meta_fields: [kind, size, mtime]
+  size: small
+
+row_color:
+  field: kind
+  rules:
+    - {value: dir, color: info}
+    - {else: true, color: default}

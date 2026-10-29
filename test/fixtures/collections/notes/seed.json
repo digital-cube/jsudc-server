@@ -1,0 +1,5 @@
+[
+  { "title": "Read the protocol", "pages": 12, "done": true },
+  { "title": "Write a source", "pages": 30, "done": false },
+  { "title": "Mount the plugin", "pages": 3, "done": false }
+]

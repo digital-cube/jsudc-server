@@ -1,0 +1,3 @@
+# Guide
+
+Inside docs.

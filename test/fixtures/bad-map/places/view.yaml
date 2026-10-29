@@ -1,0 +1,5 @@
+available_renderers: [table, map]
+map_options:
+  lat_field: lat
+  lng_field: lng
+  popup_fields: [name, website]

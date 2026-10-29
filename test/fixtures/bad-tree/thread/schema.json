@@ -1,0 +1,1 @@
+{"version":"v1","fields":{"parent_id":{"type":"string"},"order":{"type":"integer"},"body":{"type":"text"}}}

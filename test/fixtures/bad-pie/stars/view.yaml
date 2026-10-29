@@ -1,0 +1,4 @@
+available_renderers: [chart]
+chart_options:
+  type: pie
+  category_field: name

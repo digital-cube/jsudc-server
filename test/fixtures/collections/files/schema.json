@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "core_fields": [],
+  "fields": {
+    "name": { "type": "string", "description": "The entry's name; .. leads to the parent folder" },
+    "kind": { "type": "enum", "values": ["dir", "file"] },
+    "ext": { "type": "string", "description": "The extension, lower case, without the dot" },
+    "size": { "type": "integer", "min": 0, "description": "Bytes; empty for a folder" },
+    "mtime": { "type": "datetime", "description": "Last modified" },
+    "path": {
+      "type": "string",
+      "description": "Relative to the collection's root; picks the folder listed"
+    }
+  },
+  "field_order": ["name", "kind", "ext", "size", "mtime", "path"]
+}

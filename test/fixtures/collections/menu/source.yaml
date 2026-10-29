@@ -1,0 +1,7 @@
+kind: yaml_menu
+options:
+  file: data/menu.yaml
+  dynamic: true
+  collection_icons:
+    companies: lucide:building-2
+    menu: lucide:list-tree

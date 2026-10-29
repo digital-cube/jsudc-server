@@ -1,0 +1,3 @@
+available_renderers: [tree, table]
+tree_options:
+  label_field: title

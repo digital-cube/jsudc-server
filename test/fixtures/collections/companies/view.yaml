@@ -1,0 +1,126 @@
+# The companies demo view. Same dialect as dclabs serbian_companies, but the
+# business columns are editable so inline edit can be shown.
+default_renderer: table
+available_renderers: [table, cards, map]
+pagination: infinite
+page_size_default: 50
+row_height: 48
+
+columns:
+  - {field: pib, pin: left, editable: false, width: 110}
+  # name is the primary lookup field: semantic info color/bg, titlecased.
+  - field: name
+    pin: left
+    editable: true
+    width: 320
+    transform: titlecase
+    color: info
+    bg: info
+  - {field: mb, editable: false, width: 120}
+  - {field: legal_form, editable: false, width: 110}
+  # city + industry are the string filter demos.
+  - {field: city, editable: true, width: 140}
+  - {field: industry, editable: true, width: 200}
+  # employees + revenue_eur are the numeric sort demos (jsonb numeric cast).
+  - {field: employees, render: number_format, editable: true, width: 110, align: right}
+  - {field: revenue_eur, render: number_format, editable: true, width: 130, align: right}
+  - field: founded
+    editable: true
+    width: 120
+    transform: date_format:DD.MM.YYYY
+  - field: active
+    editable: true
+    width: 80
+    align: center
+    render: bool
+    render_options: {style: check_x}
+
+search:
+  fields: [name, pib, mb, city]
+  placeholder: Search by name, PIB, MB or city
+  case_insensitive: true
+
+filters:
+  - field: city
+    kind: select
+    label: City
+    options:
+      - Beograd
+      - Novi Sad
+      - Niš
+      - Kragujevac
+      - Subotica
+      - Zrenjanin
+      - Pančevo
+      - Čačak
+      - Kraljevo
+      - Novi Pazar
+      - Smederevo
+      - Leskovac
+      - Valjevo
+      - Kruševac
+      - Šabac
+      - Užice
+      - Sombor
+      - Požarevac
+      - Vranje
+      - Pirot
+  - field: industry
+    kind: select
+    label: Industry
+    options:
+      - Građevinarstvo
+      - Trgovina
+      - Transport
+      - Poljoprivreda
+      - Informacione tehnologije
+      - Prehrambena industrija
+      - Energetika
+      - Turizam
+      - Metalska industrija
+      - Tekstilna industrija
+      - Farmacija
+      - Finansije
+      - Obrazovanje
+      - Zdravstvo
+      - Telekomunikacije
+  - {field: active, kind: bool, label: Active}
+  - {field: employees, kind: range, label: Employees, min: 0, max: 5000, step: 50}
+
+filterable:
+  fields: [pib, name, mb, legal_form, city, industry, employees, revenue_eur, founded, active]
+
+# `website` is not in schema.json: the cards leave it out until someone adds that
+# field from the table header (the demo in docs/demo.md), then show it.
+card_options:
+  title_field: name
+  subtitle_field: pib
+  meta_fields: [city, industry, employees, revenue_eur, active, website]
+  size: medium
+
+# The map: one circle per company at its lat / lng (the city's centre plus a few km,
+# see scripts/generate-companies.ts), growing with the head count. The chips and
+# the search move the markers as they narrow the table.
+map_options:
+  lat_field: lat
+  lng_field: lng
+  radius_field: employees
+  radius_min: 4
+  radius_scale: 0.02
+  # 1,000 employees and up: the cap, so Beograd stays a cluster, not a blot.
+  radius_max: 24
+  popup_fields: [name, city, industry, employees]
+  center: [44.2, 20.9]
+  zoom: 7
+  regions:
+    - {id: serbia, label: Serbia, center: [44.2, 20.9], zoom: 7}
+    - {id: vojvodina, label: Vojvodina, center: [45.4, 19.9], zoom: 8}
+    - {id: south, label: South, center: [43.15, 21.9], zoom: 8}
+
+# Inactive companies are muted: dimmer text in the table, a grey accent bar on the cards.
+row_color:
+  field: active
+  rules:
+    - {value: false, color: muted}
+
+row_actions: []

@@ -1,0 +1,26 @@
+# quakes — the USGS feed of the month's M4.5+ earthquakes; the tests read the
+# answer recorded in ../http/quakes.json instead of calling USGS.
+kind: http_api
+options:
+  base_url: https://earthquake.usgs.gov
+  list_endpoint: /earthquakes/feed/v1.0/summary/4.5_month.geojson
+  # A GeoJSON FeatureCollection: the rows are its `features`.
+  list_unwrap: features
+  id_field: id
+  headers:
+    Accept: application/geo+json
+    User-Agent: jsudc-server-tests
+  # GeoJSON keeps the position as [longitude, latitude, depth]: lng first.
+  field_map:
+    mag: properties.mag
+    place: properties.place
+    time: properties.time
+    depth: geometry.coordinates[2]
+    lat: geometry.coordinates[1]
+    lng: geometry.coordinates[0]
+    alert: properties.alert
+    status: properties.status
+    type: properties.type
+    url: properties.url
+  timeout_ms: 20000
+  cache_ttl_ms: 60000

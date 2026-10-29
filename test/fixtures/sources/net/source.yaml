@@ -1,0 +1,5 @@
+kind: http_api
+base_url: https://net.example.test
+list_endpoint: /items
+id_field: id
+field_map: {title: name}

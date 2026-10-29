@@ -1,0 +1,89 @@
+{
+  "name": "@jsudc/server",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "A UDC server in TypeScript: the dispatcher, the collection registry, five sources (Postgres jsonb, memory, filesystem, HTTP API, YAML menu), schema revisions and edits, seeding, and a Fastify plugin.",
+  "keywords": [
+    "udc",
+    "jsudc",
+    "universal-data-collection",
+    "fastify",
+    "fastify-plugin",
+    "postgres",
+    "jsonb",
+    "drizzle"
+  ],
+  "license": "MIT",
+  "author": "DigitalCube",
+  "repository": "github:digital-cube/jsudc-server",
+  "homepage": "https://github.com/digital-cube/jsudc-server#readme",
+  "bugs": "https://github.com/digital-cube/jsudc-server/issues",
+  "engines": {
+    "node": ">=24"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@jsudc/core": "^0.1.0",
+    "yaml": "^2.9.1"
+  },
+  "peerDependencies": {
+    "@fastify/swagger": "^9.9.2",
+    "@fastify/swagger-ui": "^6.1.2",
+    "drizzle-orm": "^0.45.4",
+    "fastify": "^5.12.7",
+    "fastify-type-provider-zod": "^7.0.0",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "peerDependenciesMeta": {
+    "@fastify/swagger": {
+      "optional": true
+    },
+    "@fastify/swagger-ui": {
+      "optional": true
+    },
+    "fastify-type-provider-zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@fastify/swagger": "^9.9.2",
+    "@fastify/swagger-ui": "^6.1.2",
+    "@types/node": "^24",
+    "@types/pg": "^8.23.1",
+    "@vitest/coverage-v8": "^5.0.5",
+    "drizzle-orm": "^0.45.4",
+    "fastify": "^5.12.7",
+    "fastify-type-provider-zod": "^7.0.0",
+    "pg": "^8.23.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5",
+    "zod": "^4.6.7"
+  }
+}

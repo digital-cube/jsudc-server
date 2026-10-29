@@ -1,0 +1,23 @@
+- code: HOME
+  translation_key: MENU_HOME
+  icon: lucide:house
+  url: /
+- code: COLLECTIONS
+  translation_key: MENU_COLLECTIONS
+  icon: lucide:database
+  children:
+    - code: DATABASE
+      translation_key: MENU_DATABASE
+      children: "udc:collections?group=database"
+    - code: EVERYTHING
+      translation_key: MENU_EVERYTHING
+      children: "udc:collections"
+- code: VIEWS
+  translation_key: MENU_VIEWS
+  children:
+    - code: TICKETS
+      translation_key: MENU_VIEW_TICKETS
+      url: /udc/tickets?tab=kanban
+    - code: MAP
+      translation_key: MENU_VIEW_MAP
+      url: /udc/companies?tab=map

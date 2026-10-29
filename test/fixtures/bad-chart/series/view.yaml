@@ -1,0 +1,5 @@
+available_renderers: [chart, table]
+chart_options:
+  type: line
+  x_field: ts
+  series: [{field: cpu}, {field: mem}]

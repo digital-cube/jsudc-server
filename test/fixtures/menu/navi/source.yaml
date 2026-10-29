@@ -1,0 +1,5 @@
+kind: yaml_menu
+options:
+  file: data/menu.yaml
+  collection_icons:
+    alpha: lucide:building-2

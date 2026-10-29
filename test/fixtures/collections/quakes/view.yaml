@@ -1,0 +1,79 @@
+# quakes — a month of M4.5+ earthquakes from USGS (source.yaml), opening on the map.
+# The page polls every minute; the server's 60 s cache decides when USGS is asked again.
+default_renderer: map
+available_renderers: [map, table, cards, chart]
+pagination: infinite
+page_size_default: 100
+row_height: 36
+refresh_interval_ms: 60000
+
+map_options:
+  lat_field: lat
+  lng_field: lng
+  radius_field: mag
+  radius_scale: 2.5
+  radius_min: 4
+  popup_fields: [place, mag, depth, time, alert]
+  zoom: 2
+  # Opens on the whole world: fitting ~700 markers around the globe would zoom out past it.
+  default_region: world
+  fit_bounds: false
+  regions:
+    - {id: world, label: World, center: [20, 0], zoom: 2}
+    - {id: europe, label: Europe, center: [48, 15], zoom: 4}
+    - {id: pacific, label: Pacific, center: [5, 160], zoom: 3}
+
+# Magnitude per event over the window: one bar per quake, framed on the
+# magnitudes rather than on zero. When more quakes fall in the window than the
+# width can draw, the time buckets show their strongest (`agg: max`).
+chart_options:
+  type: bar
+  x_field: time
+  series:
+    - {field: mag, agg: max}
+  y_axis:
+    left: {baseline: data}
+  window:
+    field: time
+    presets: ["24h", "7d", "30d"]
+    default: "7d"
+
+search:
+  fields: [place]
+  placeholder: "Search place…"
+
+filters:
+  - {field: alert, kind: select, options: [green, yellow, orange, red]}
+  - {field: mag, kind: range, min: 4.5, max: 8, step: 0.1}
+
+filterable:
+  fields: [place, mag, depth, time, alert, status, type]
+
+columns:
+  - {field: mag, pin: left, width: 80, align: right, render: number_format, render_options: {decimals: 1}}
+  - {field: place, pin: left, width: 320}
+  - {field: time, width: 170}
+  - {field: depth, width: 100, align: right, render: number_format, render_options: {decimals: 1}}
+  - {field: alert, width: 100, render: badge,
+     render_options: {map: {green: success, yellow: warning, orange: warning, red: danger}}}
+  - {field: status, width: 110, render: badge,
+     render_options: {map: {reviewed: success, automatic: muted, deleted: danger}}}
+  - {field: type, width: 130, color: muted}
+  - {field: lat, width: 90, align: right, render: number_format, render_options: {decimals: 2}}
+  - {field: lng, width: 90, align: right, render: number_format, render_options: {decimals: 2}}
+  - {field: url, width: 300, color: muted}
+
+card_options:
+  title_field: place
+  subtitle_field: time
+  meta_fields: [mag, depth, alert]
+  size: medium
+
+# The USGS classes: 7+ major, 6–6.9 strong, 5–5.9 moderate. The same rules colour the markers.
+row_color:
+  field: mag
+  rules:
+    - {min: 7, color: danger}
+    - {min: 6, max: 6.999, color: warning}
+    - {min: 5, max: 5.999, color: info}
+    - {else: true, color: default}

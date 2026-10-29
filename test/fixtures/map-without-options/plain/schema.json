@@ -1,0 +1,1 @@
+{"version":"v1","fields":{"name":{"type":"string"},"lat":{"type":"decimal"},"lng":{"type":"decimal"}}}

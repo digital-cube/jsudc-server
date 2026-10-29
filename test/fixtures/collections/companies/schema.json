@@ -1,0 +1,18 @@
+{
+  "version": "v1",
+  "core_fields": [],
+  "fields": {
+    "pib": { "type": "string", "length": 13, "index": true },
+    "name": { "type": "string", "length": 200, "required": true, "index": true },
+    "mb": { "type": "string", "length": 16, "index": true },
+    "legal_form": { "type": "string", "length": 40, "index": true },
+    "city": { "type": "string", "length": 80, "index": true },
+    "industry": { "type": "string", "length": 80, "index": true },
+    "employees": { "type": "integer", "min": 0, "index": true },
+    "revenue_eur": { "type": "integer", "min": 0, "index": true },
+    "founded": { "type": "date" },
+    "active": { "type": "bool", "index": true },
+    "lat": { "type": "decimal", "min": -90, "max": 90 },
+    "lng": { "type": "decimal", "min": -180, "max": 180 }
+  }
+}

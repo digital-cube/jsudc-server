@@ -1,0 +1,9 @@
+{
+  "version": "v1",
+  "core_fields": [],
+  "fields": {
+    "title": { "type": "string", "required": true },
+    "pages": { "type": "integer", "min": 0 },
+    "done": { "type": "bool" }
+  }
+}

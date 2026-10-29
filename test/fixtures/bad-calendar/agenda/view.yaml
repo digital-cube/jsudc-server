@@ -1,0 +1,4 @@
+available_renderers: [calendar, table]
+calendar_options:
+  start_field: day
+  end_field: end

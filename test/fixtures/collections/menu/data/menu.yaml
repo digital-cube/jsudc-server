@@ -1,0 +1,22 @@
+- code: HOME
+  translation_key: MENU_HOME
+  icon: lucide:house
+  url: /
+- code: COLLECTIONS
+  translation_key: MENU_COLLECTIONS
+  children:
+    - code: DATABASE
+      translation_key: MENU_DATABASE
+      children: "udc:collections?group=database"
+    - code: FILES
+      translation_key: MENU_FILES
+      children: "udc:collections?group=files"
+    - code: INTERNET
+      translation_key: MENU_INTERNET
+      children: "udc:collections?group=internet"
+- code: DOCS
+  translation_key: MENU_DOCS
+  children:
+    - code: FILES_DOC
+      translation_key: MENU_DOC_FILES
+      url: /udc/files?tab=doc

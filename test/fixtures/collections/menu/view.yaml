@@ -1,0 +1,11 @@
+default_renderer: tree
+available_renderers: [tree, table]
+tree_options:
+  label_field: translation_key
+  label_i18n: true
+  icon_field: icon
+  depth_field: depth
+  children_count_field: children_count
+  ancestor_ids_field: ancestor_ids
+search:
+  fields: [translation_key, code, url]

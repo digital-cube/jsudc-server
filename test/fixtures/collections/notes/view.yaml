@@ -1,0 +1,7 @@
+default_renderer: table
+available_renderers: [table, cards]
+page_size_default: 10
+columns:
+  - {field: title, editable: true}
+  - {field: pages, editable: true}
+  - {field: done, editable: true, render: bool}
