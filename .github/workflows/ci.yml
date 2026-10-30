@@ -16,6 +16,10 @@ jobs:
           POSTGRES_USER: jsudc
           POSTGRES_PASSWORD: jsudc
           POSTGRES_DB: jsudc_test
+          # Byte-order collation, as in development: the SQL filter compiler and the
+          # in-memory evaluator compare strings by code point; under en_US.utf8 (the
+          # image's default) string gt/gte/lte/between in pg-filter.test.ts disagree.
+          POSTGRES_INITDB_ARGS: --locale=C.UTF-8
         ports:
           - 5432:5432
         options: >-
