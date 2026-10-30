@@ -32,20 +32,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      # The devDependency @jsudc/core still comes from the private digital-cube/jsudc-core at
-      # its v0.1.0 tag (package-lock.json pins it over SSH) until 0.1.1 is on npmjs.org.
-      # JSUDC_CORE_DEPLOY_KEY is the private half of a read-only deploy key of that repository.
-      # Without the secret the step does nothing: once jsudc-core is public, npm fetches it as an
-      # HTTPS tarball and needs no key.
-      - name: Read access to digital-cube/jsudc-core
-        env:
-          DEPLOY_KEY: ${{ secrets.JSUDC_CORE_DEPLOY_KEY }}
-        run: |
-          [ -n "$DEPLOY_KEY" ] || { echo "No JSUDC_CORE_DEPLOY_KEY: skipped"; exit 0; }
-          mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts
       # `npm ci` also runs `prepare`, which builds dist.
       - run: npm ci
       - run: npm run typecheck
