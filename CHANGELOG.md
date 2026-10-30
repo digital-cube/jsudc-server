@@ -19,6 +19,11 @@ No changes to the code or the API; released in lockstep with `@jsudc/react`
 - Development installs `@jsudc/core` from npm (`^0.1.1`) instead of
   `github:digital-cube/jsudc-core#v0.1.0`; `package-lock.json` no longer pins
   it over SSH, and CI and the publish workflow drop the deploy-key step.
+- CI and the publish workflow initialise their Postgres with
+  `--locale=C.UTF-8`, the byte-order collation of development: under the
+  image's default `en_US.utf8` the string comparisons of `pg-filter.test.ts`
+  (`gt`, `gte`, `lte`, `between`) disagree with the in-memory evaluator, so CI
+  was red and a tag could not publish. The library's SQL is unchanged.
 
 ## [0.1.1] - 2026-10-29
 
