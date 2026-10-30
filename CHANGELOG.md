@@ -7,6 +7,11 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-30
+
+Released in lockstep with `@jsudc/react` 0.2.1; `@jsudc/core` stays 0.2.0 and
+the peer range `^0.2.0` is unchanged.
+
 ### Fixed
 
 - String comparisons and sorts no longer depend on the database's collation.
@@ -81,7 +86,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/digital-cube/jsudc-server/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/digital-cube/jsudc-server/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/digital-cube/jsudc-server/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/digital-cube/jsudc-server/releases/tag/v0.1.0
