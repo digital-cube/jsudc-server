@@ -8,6 +8,7 @@ import {
 } from "@jsudc/core";
 import { sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ensureUdcSchema } from "../src/db/ensure.js";
 import { createDispatcher } from "../src/dispatcher.js";
 import { CollectionRegistry, readCollectionAssets } from "../src/registry.js";
 import { writeSchemaRevision } from "../src/schema-store.js";
@@ -353,8 +354,28 @@ describe("jsonb indexes", () => {
       /\(\(\(data ->> 'staff'::text\)\)::numeric\)/,
     );
     const web = await indexDef("companies_data_website_idx");
-    expect(web).toContain("(data ->> 'website'::text)");
+    expect(web).toContain(`(((data ->> 'website'::text)) COLLATE "C")`);
     expect(web).not.toContain("::numeric");
+  });
+
+  it("rebuilds a text index of the bare expression on the code-point one (migration 0002)", async () => {
+    const long = `f${"x".repeat(60)}`;
+    await db.execute(sql`create index companies_data_name_old on companies ((data->>'name'))`);
+    await db.execute(sql.raw(`drop index companies_data_name_idx`));
+    await db.execute(
+      sql.raw(`create index companies_data_name_idx on companies ((data->>'name'))`),
+    );
+    await db.execute(
+      sql.raw(`create index "${indexName("companies", long)}" on companies ((data->>'${long}'))`),
+    );
+    await ensureUdcSchema(db);
+    expect(await indexDef("companies_data_name_idx")).toContain(
+      `(((data ->> 'name'::text)) COLLATE "C")`,
+    );
+    expect(await indexDef(indexName("companies", long))).toContain(`COLLATE "C"`);
+    // Not a name syncFieldIndexes gives: left alone.
+    expect(await indexDef("companies_data_name_old")).not.toContain("COLLATE");
+    await db.execute(sql`drop index companies_data_name_old`);
   });
 
   it("indexes date, datetime and bool through immutable expressions", async () => {
@@ -386,6 +407,7 @@ describe("jsonb indexes", () => {
   it.each([
     ["employees", "companies_data_employees_idx"],
     ["founded", "companies_data_founded_idx"],
+    ["name", "companies_data_name_idx"],
   ])("match the expression the query compiler sorts %s by", async (field, index) => {
     if (field === "founded") await updateField("founded", { type: "date", index: true });
     const [term] = compileSort([{ field, dir: "asc" }], await source.describe());

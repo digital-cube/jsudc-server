@@ -8,7 +8,21 @@ on:
 
 jobs:
   check:
+    name: check (postgres ${{ matrix.locale }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The SQL compiler compares and sorts text by code point (COLLATE "C"), as the
+        # in-memory evaluator does, whatever the database's collation: the image's
+        # default en_US.utf8 (linguistic) is what catches a comparison without it;
+        # C.UTF-8 is the collation of development. (Not plain C: its lower() and
+        # ILIKE fold ASCII only, so case-insensitive matches of "Č" would differ.)
+        include:
+          - locale: en_US.utf8
+            initdb_args: ""
+          - locale: C.UTF-8
+            initdb_args: --locale=C.UTF-8
     services:
       postgres:
         image: postgres:16
@@ -16,10 +30,7 @@ jobs:
           POSTGRES_USER: jsudc
           POSTGRES_PASSWORD: jsudc
           POSTGRES_DB: jsudc_test
-          # Byte-order collation, as in development: the SQL filter compiler and the
-          # in-memory evaluator compare strings by code point; under en_US.utf8 (the
-          # image's default) string gt/gte/lte/between in pg-filter.test.ts disagree.
-          POSTGRES_INITDB_ARGS: --locale=C.UTF-8
+          POSTGRES_INITDB_ARGS: ${{ matrix.initdb_args }}
         ports:
           - 5432:5432
         options: >-

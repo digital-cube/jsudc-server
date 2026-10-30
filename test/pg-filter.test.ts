@@ -110,6 +110,11 @@ const CASES: Record<string, Case[]> = {
     [c("s", "lte", "Alfa"), ["r1", "r3", "r6"]],
     [c("s", "between", ["A", "H"]), ["r1", "r4", "r6"]],
     [c("s", "between", ["Alfa", "Gama"]), ["r1", "r4"]],
+    // Code point order on both sides whatever the database's collation: lowercase after
+    // uppercase, so under en_US.utf8 these would differ from the in-memory evaluator.
+    [c("s", "gt", "alfa", true), ["r2", "r4", "r6"]],
+    [c("s", "lt", "B", true), ["r1", "r3", "r6"]],
+    [c("s", "between", ["alfa", "beta"], true), ["r1", "r2", "r6"]],
     [c("s", "is_null"), ["r5"]],
     [c("s", "is_not_null"), ["r1", "r2", "r3", "r4", "r6"]],
   ],
@@ -245,6 +250,15 @@ describe("typed ordering", () => {
   it("orders integers numerically (10 after 9), nulls last both ways", async () => {
     expect(await order("n", "asc")).toEqual(["r6", "r4", "r1", "r2", "r3", "r5"]);
     expect(await order("n", "desc")).toEqual(["r3", "r2", "r1", "r4", "r6", "r5"]);
+  });
+
+  it("orders strings by code point, whatever the database's collation", async () => {
+    // "100% …" < "ALFA beta" < "Alfa" < "Gama" < "beta", as JavaScript's `<` has it.
+    expect(await order("s", "asc")).toEqual(["r3", "r6", "r1", "r4", "r2", "r5"]);
+    expect(await order("s", "desc")).toEqual(["r2", "r4", "r1", "r6", "r3", "r5"]);
+    const strings = ROWS.filter((r) => r.s !== undefined);
+    const byLt = [...strings].sort((a, b) => ((a.s as string) < (b.s as string) ? -1 : 1));
+    expect(byLt.map((r) => r.tag)).toEqual(["r3", "r6", "r1", "r4", "r2"]);
   });
 
   it("orders decimals, dates and bools by their type", async () => {
