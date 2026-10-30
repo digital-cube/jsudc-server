@@ -7,6 +7,12 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Development installs `@jsudc/core` from npm (`^0.1.1`) instead of
+  `github:digital-cube/jsudc-core#v0.1.0`; `package-lock.json` no longer pins
+  it over SSH, and CI and the publish workflow drop the deploy-key step.
+
 ## [0.1.1] - 2026-10-29
 
 First release on npmjs.org. No change to the code or the API.
