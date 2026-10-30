@@ -1,6 +1,6 @@
 {
   "name": "@jsudc/server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "description": "A UDC server in TypeScript: the dispatcher, the collection registry, five sources (Postgres jsonb, memory, filesystem, HTTP API, YAML menu), schema revisions and edits, seeding, and a Fastify plugin.",
