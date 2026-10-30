@@ -1,6 +1,6 @@
 {
   "name": "@jsudc/server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "A UDC server in TypeScript: the dispatcher, the collection registry, five sources (Postgres jsonb, memory, filesystem, HTTP API, YAML menu), schema revisions and edits, seeding, and a Fastify plugin.",
@@ -63,7 +63,7 @@
   "peerDependencies": {
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^6.1.2",
-    "@jsudc/core": "^0.1.1",
+    "@jsudc/core": "^0.2.0",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.7",
     "fastify-type-provider-zod": "^7.0.0",

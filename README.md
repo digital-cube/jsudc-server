@@ -1,5 +1,7 @@
 # @jsudc/server
 
+[![npm](https://img.shields.io/npm/v/@jsudc/server)](https://www.npmjs.com/package/@jsudc/server)
+
 A UDC (Universal Data Collection) server in TypeScript. Point it at a
 directory of collections — each one a `view.yaml`, a `schema.json` and,
 optionally, a `source.yaml` — and it serves them through the UDC protocol of
@@ -25,7 +27,7 @@ npm install @jsudc/server @jsudc/core fastify drizzle-orm pg zod
 # the OpenAPI docs at /docs (on by default):
 npm install @fastify/swagger @fastify/swagger-ui fastify-type-provider-zod
 # or straight from a GitHub tag:
-npm install github:digital-cube/jsudc-core#v0.1.1 github:digital-cube/jsudc-server#v0.1.1
+npm install github:digital-cube/jsudc-core#v0.2.0 github:digital-cube/jsudc-server#v0.2.0
 ```
 
 ## Quick start
