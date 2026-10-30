@@ -7,6 +7,28 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- String comparisons and sorts no longer depend on the database's collation.
+  `gt`, `gte`, `lt`, `lte` and `between` on a text field, `ORDER BY` and the
+  cursor of `list` compare by code point (`COLLATE "C"`), as `evaluateFilter`
+  in `@jsudc/core` does. On a database with a linguistic collation (the
+  `postgres` image's default `en_US.utf8`) the same filter used to give the
+  server one result and the browser another: `gt "a"` matched `Alfa`, and
+  sorting put `beta` before `Gama`. `case_insensitive` comparisons lower-case
+  under the database's collation, then compare by code point.
+- The expression index of an `index: true` text field is built on the same
+  `COLLATE "C"` expression, so the planner keeps using it. The new migration
+  `0002_udc_text_index_collation.sql` (run by `ensureUdcSchema`) rebuilds an
+  index made before on the bare expression; that locks writes on the table
+  while it runs, once.
+
+### Changed
+
+- CI tests against `postgres:16` with its default locale (`en_US.utf8`) and
+  with `C.UTF-8`; the publish workflow uses the default locale. The
+  `--locale=C.UTF-8` workaround of 0.2.0 is gone.
+
 ## [0.2.0] - 2026-10-30
 
 No changes to the code or the API; released in lockstep with `@jsudc/react`

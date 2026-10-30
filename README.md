@@ -178,6 +178,10 @@ expression indexes use). Two ways to get them, both idempotent:
   installed package: `UDC_MIGRATIONS_DIR`) into your own drizzle / knex /
   flyway tree and apply them with the rest.
 
+Text fields compare and sort by code point (`COLLATE "C"`), as `evaluateFilter`
+does in the browser, whatever collation the database was created with. Migration
+`0002` rebuilds a text field index an earlier version made on the bare expression.
+
 **Collection tables**: one per `postgres_jsonb` collection, all of the same
 shape. With drizzle, declare them through `collectionTable` and generate your
 migrations as usual; keep `udcSchemaRevisions` in the same schema file so

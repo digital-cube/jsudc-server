@@ -11,6 +11,7 @@ describe("the UDC-owned SQL", () => {
     expect(udcMigrations().map((m) => m.name)).toEqual([
       "0000_udc_schema_revisions.sql",
       "0001_udc_cast_functions.sql",
+      "0002_udc_text_index_collation.sql",
     ]);
   });
 
@@ -18,6 +19,7 @@ describe("the UDC-owned SQL", () => {
     expect(await ensureUdcSchema(db)).toEqual([
       "0000_udc_schema_revisions.sql",
       "0001_udc_cast_functions.sql",
+      "0002_udc_text_index_collation.sql",
     ]);
     await ensureUdcSchema(db);
     const fns = await db.execute<{ d: string; t: string }>(

@@ -184,7 +184,7 @@ beforeAll(async () => {
   memory = new MemorySource({ schema: companiesSchema, rows: pgRows });
 });
 
-// Text order is the database collation's in SQL and localeCompare's in memory, so the
+// Text order is code point order in SQL (COLLATE "C") and localeCompare's in memory, so the
 // parity sorts are the typed ones: numbers, dates, bools (nulls last, ties by id in both).
 const SORTS: SortKey[][] = [
   [{ field: "employees" }],

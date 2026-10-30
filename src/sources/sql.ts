@@ -43,6 +43,16 @@ function textExpr(field: string): SQL {
 }
 
 /**
+ * Text compared and sorted by code point, whatever the database's collation:
+ * evaluateFilter compares strings with `<`, and under a linguistic collation
+ * (`en_US.utf8`, the postgres image's default) `'beta' > 'Gama'` would hold
+ * in SQL and not in memory.
+ */
+function codePoint(expr: SQL): SQL {
+  return sql`(${expr} COLLATE "C")`;
+}
+
+/**
  * The typed expression comparisons and ORDER BY use, and the expression
  * index of an indexed field is built on (so the planner can match the two).
  * date and timestamptz go through the IMMUTABLE wrappers of migration 0001:
@@ -51,7 +61,7 @@ function textExpr(field: string): SQL {
 function typedExpr(field: string, cast: Cast): SQL {
   switch (cast) {
     case "text":
-      return textExpr(field);
+      return codePoint(textExpr(field));
     case "date":
       return sql.raw(`udc_date(data->>'${field}')`);
     case "timestamptz":
@@ -174,7 +184,8 @@ function compileCondition(cond: Condition, def: FieldDef): SQL {
   const cast = castFor(def);
   // case_insensitive only means something for text comparisons, as in evaluateFilter.
   const ci = cond.case_insensitive === true && cast === "text";
-  const lhs = ci ? sql`lower(${typedExpr(field, cast)})` : typedExpr(field, cast);
+  // lower() under the database's collation (a "C" lower() folds ASCII only), then code point order.
+  const lhs = ci ? codePoint(sql`lower(${textExpr(field)})`) : typedExpr(field, cast);
   const rhs = (v: unknown) => {
     const p = param(coerce(v, cast, field, op), cast);
     return ci ? sql`lower(${p})` : p;
