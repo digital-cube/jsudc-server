@@ -24,8 +24,8 @@ What is in the package:
 npm install @jsudc/server @jsudc/core fastify drizzle-orm pg zod
 # the OpenAPI docs at /docs (on by default):
 npm install @fastify/swagger @fastify/swagger-ui fastify-type-provider-zod
-# before the npm release, from a tag:
-npm install github:digital-cube/jsudc-core#v0.1.0 github:digital-cube/jsudc-server#v0.1.0
+# or straight from a GitHub tag:
+npm install github:digital-cube/jsudc-core#v0.1.1 github:digital-cube/jsudc-server#v0.1.1
 ```
 
 ## Quick start
@@ -223,7 +223,7 @@ The fixture collections, one per source kind, are in
 `test/fixtures/collections/`.
 
 ```sh
-npm install         # also builds dist (the prepare script)
+npm ci              # also builds dist (the prepare script)
 npm run typecheck   # tsc --noEmit over src and test
 npm run lint        # Biome
 npm test            # Vitest, one file at a time (they share the database)

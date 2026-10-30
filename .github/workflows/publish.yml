@@ -1,0 +1,63 @@
+name: Publish
+
+# A pushed tag v* publishes that version to npmjs.org with provenance. npm trusts this
+# workflow through OIDC (trusted publishing, configured on the package's npm settings
+# page), so there is no NPM_TOKEN secret: the id-token permission is the credential.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jsudc
+          POSTGRES_PASSWORD: jsudc
+          POSTGRES_DB: jsudc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jsudc -d jsudc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The tests create the UDC objects and their fixture tables in it (test/global-setup.ts).
+      TEST_DATABASE_URL: postgresql://jsudc:jsudc@localhost:5432/jsudc_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing (OIDC) needs npm >= 11.5.
+      - run: npm install -g npm@latest
+      # The tag and package.json must name the same version.
+      - name: Tag matches package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      # The devDependency @jsudc/core still comes from the private digital-cube/jsudc-core at
+      # its v0.1.0 tag (package-lock.json pins it over SSH) until 0.1.1 is on npmjs.org.
+      # JSUDC_CORE_DEPLOY_KEY is the private half of a read-only deploy key of that repository.
+      # Without the secret the step does nothing: once jsudc-core is public, npm fetches it as an
+      # HTTPS tarball and needs no key.
+      - name: Read access to digital-cube/jsudc-core
+        env:
+          DEPLOY_KEY: ${{ secrets.JSUDC_CORE_DEPLOY_KEY }}
+        run: |
+          [ -n "$DEPLOY_KEY" ] || { echo "No JSUDC_CORE_DEPLOY_KEY: skipped"; exit 0; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts
+      # `npm ci` also runs `prepare`, which builds dist.
+      - run: npm ci
+      - run: npm test
+      - run: npm publish --provenance --access public

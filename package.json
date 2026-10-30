@@ -1,6 +1,6 @@
 {
   "name": "@jsudc/server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "type": "module",
   "description": "A UDC server in TypeScript: the dispatcher, the collection registry, five sources (Postgres jsonb, memory, filesystem, HTTP API, YAML menu), schema revisions and edits, seeding, and a Fastify plugin.",
@@ -8,6 +8,8 @@
     "udc",
     "jsudc",
     "universal-data-collection",
+    "universal-data-collections",
+    "data-grid",
     "fastify",
     "fastify-plugin",
     "postgres",
@@ -16,9 +18,14 @@
   ],
   "license": "MIT",
   "author": "DigitalCube",
-  "repository": "github:digital-cube/jsudc-server",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/digital-cube/jsudc-server.git"
+  },
   "homepage": "https://github.com/digital-cube/jsudc-server#readme",
-  "bugs": "https://github.com/digital-cube/jsudc-server/issues",
+  "bugs": {
+    "url": "https://github.com/digital-cube/jsudc-server/issues"
+  },
   "engines": {
     "node": ">=24"
   },
@@ -38,6 +45,9 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
@@ -48,12 +58,12 @@
     "test:cov": "vitest run --coverage"
   },
   "dependencies": {
-    "@jsudc/core": "github:digital-cube/jsudc-core#v0.1.0",
     "yaml": "^2.9.1"
   },
   "peerDependencies": {
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^6.1.2",
+    "@jsudc/core": "^0.1.1",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.7",
     "fastify-type-provider-zod": "^7.0.0",
@@ -75,6 +85,7 @@
     "@biomejs/biome": "^2.5.15",
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^6.1.2",
+    "@jsudc/core": "github:digital-cube/jsudc-core#v0.1.0",
     "@types/node": "^24",
     "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.5",
