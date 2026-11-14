@@ -12,7 +12,7 @@ import {
 } from "@jsudc/core";
 import { type SQL, sql } from "drizzle-orm";
 import type { CursorValue } from "./cursor.js";
-import { allowedField } from "./fields.js";
+import { allowedCondition, allowedField } from "./fields.js";
 
 // Every function here takes field names only after `allowedField` let them
 // through (schema allowlist + FIELD_NAME_RE), so writing them into the SQL
@@ -218,10 +218,33 @@ function compileCondition(cond: Condition, def: FieldDef): SQL {
   throw new UdcError("unsupported_op", `unsupported filter op: ${String(op)}`, { field, op });
 }
 
+/**
+ * A condition on the row id (`id`, when the schema has no such field): the
+ * `id` column as text, so a malformed id is a miss, not a cast error.
+ * `allowedCondition` already limited the op to eq neq in not_in and the nulls.
+ */
+function compileIdCondition(cond: Condition): SQL {
+  const { field, op, value } = cond;
+  const id = sql.raw("(id::text)");
+  if (op === "is_null") return sql`(${id} IS NULL)`;
+  if (op === "is_not_null") return sql`(${id} IS NOT NULL)`;
+  if (op === "eq" || op === "neq") {
+    if (isMissing(value)) return NULL;
+    return sql`(${id} ${sql.raw(op === "eq" ? "=" : "<>")} ${scalarText(value, field, op)}::text)`;
+  }
+  if (!Array.isArray(value)) throw badValue(field, op, "an array");
+  const items = value.filter((v) => !isMissing(v)).map((v) => scalarText(v, field, op));
+  const arr = sql`${sql.param(items)}::text[]`;
+  return op === "in" ? sql`(${id} = ANY(${arr}))` : sql`(${id} <> ALL(${arr}))`;
+}
+
 /** A filter tree as a WHERE expression, with SQL's three-valued logic (which evaluateFilter mirrors). */
 export function compileFilter(node: FilterNode | null | undefined, schema: SchemaDoc): SQL {
   if (!node) return sql`TRUE`;
-  if (isCondition(node)) return compileCondition(node, allowedField(schema, node.field, "filter"));
+  if (isCondition(node)) {
+    const def = allowedCondition(schema, node);
+    return def ? compileCondition(node, def) : compileIdCondition(node);
+  }
   if ("and" in node) {
     if (node.and.length === 0) return sql`TRUE`;
     return sql`(${sql.join(

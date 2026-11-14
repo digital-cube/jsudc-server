@@ -1,8 +1,13 @@
 import {
+  type Condition,
   type FieldDef,
   type FilterNode,
+  type FilterOp,
   isCondition,
+  isRowIdField,
   isValidFieldName,
+  LOOKUP_ARRAY_FILTER_OPS,
+  LOOKUP_FILTER_OPS,
   type RowProblem,
   type SchemaDoc,
   type SortKey,
@@ -125,13 +130,55 @@ export function filterFields(node: FilterNode | null | undefined): string[] {
   return filterFields(node.not);
 }
 
+export function filterConditions(node: FilterNode | null | undefined): Condition[] {
+  if (!node) return [];
+  if (isCondition(node)) return [node];
+  if ("and" in node) return node.and.flatMap(filterConditions);
+  if ("or" in node) return node.or.flatMap(filterConditions);
+  return filterConditions(node.not);
+}
+
+/**
+ * The ops a condition on this field may use, when they are narrower than
+ * the protocol's: a lookup key (and the row id) is an identity, compared and
+ * listed, never read as text or as an order.
+ */
+function narrowedOps(schema: SchemaDoc, field: string, def: FieldDef | undefined) {
+  if (!def && isRowIdField(schema, field)) return LOOKUP_FILTER_OPS;
+  if (def?.type === "lookup") return LOOKUP_FILTER_OPS;
+  if (def?.type === "lookup_array") return LOOKUP_ARRAY_FILTER_OPS;
+  return undefined;
+}
+
+/**
+ * One filter condition allowlisted: a live schema field, or `id` (the row
+ * id) when the schema has no field of that name. Answers the field's def,
+ * `undefined` for the row id. An op a lookup field (or the id) does not take
+ * is `unsupported_op`.
+ */
+export function allowedCondition(schema: SchemaDoc, cond: Condition): FieldDef | undefined {
+  const def = isRowIdField(schema, cond.field)
+    ? undefined
+    : allowedField(schema, cond.field, "filter");
+  const ops: readonly FilterOp[] | undefined = narrowedOps(schema, cond.field, def);
+  if (ops && !ops.includes(cond.op)) {
+    const what = def ? `the ${def.type} field ${cond.field}` : "the row id";
+    throw new UdcError(
+      "unsupported_op",
+      `${cond.op} is not supported on ${what} (ops: ${ops.join(" ")})`,
+      { field: cond.field, op: cond.op },
+    );
+  }
+  return def;
+}
+
 /** Check every field a list request names before anything runs. */
 export function assertQueryFields(
   schema: SchemaDoc,
   filter: FilterNode | undefined,
   sort: SortKey[] | undefined,
 ): void {
-  for (const field of filterFields(filter)) allowedField(schema, field, "filter");
+  for (const cond of filterConditions(filter)) allowedCondition(schema, cond);
   for (const key of sort ?? []) allowedField(schema, key.field, "sort");
 }
 

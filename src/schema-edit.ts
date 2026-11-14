@@ -1,11 +1,11 @@
 import {
   type FieldDef,
   FieldDefSchema,
-  isPhase1Type,
+  isStorableType,
   isValidFieldName,
-  PHASE1_FIELD_TYPES,
   type SchemaDoc,
   type SchemaPosition,
+  STORABLE_FIELD_TYPES,
   UdcError,
 } from "@jsudc/core";
 import { z } from "zod";
@@ -97,10 +97,10 @@ export function applySchemaEdit(schema: SchemaDoc, edit: SchemaEdit): SchemaDoc 
         });
       }
       const def = incomingDef(edit.name, edit.fielddef);
-      if (!isPhase1Type(def.type)) {
+      if (!isStorableType(def.type)) {
         throw new UdcError(
           "unsupported_op",
-          `field type ${def.type} is not storable yet (phase 1: ${PHASE1_FIELD_TYPES.join(" ")})`,
+          `field type ${def.type} is not storable yet (storable: ${STORABLE_FIELD_TYPES.join(" ")})`,
           { field: edit.name, type: def.type },
         );
       }

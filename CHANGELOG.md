@@ -7,6 +7,24 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+Needs `@jsudc/core` with lookups (the same release).
+
+### Added
+
+- Lookups, level 1: `lookup` / `lookup_array` fields store their key, sort
+  by it (as text) and filter on it with `eq neq in not_in is_null
+  is_not_null` (`lookup_array`: `in not_in is_null is_not_null`); any other op
+  on them is `unsupported_op`. An indexed `lookup` gets an expression index.
+- `id` in a filter is the row id when the schema has no `id` field, in every
+  source (`eq neq in not_in is_null is_not_null`).
+- `loadRegistry` checks lookup targets and `row_link`s against the served
+  collections and stops the start on a mismatch; `udcPlugin` (with
+  `registry`) checks the active schemas too (`checkLinks: false` skips it).
+  New exports: `registryLinkProblems`, `assertRegistryLinks`,
+  `checkRegistryLinks`, `assertLookupTarget`.
+- `schema.add_field` accepts `lookup` / `lookup_array` and checks the target;
+  `schema.update_field` checks it too.
+
 ## [0.2.1] - 2026-10-30
 
 Released in lockstep with `@jsudc/react` 0.2.1; `@jsudc/core` stays 0.2.0 and
