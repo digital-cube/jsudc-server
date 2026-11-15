@@ -7,7 +7,10 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
-Needs `@jsudc/core` with lookups (the same release).
+## [0.3.0] - 2026-11-15
+
+Lookups, level 1, on the server side, released together with `@jsudc/core`
+0.3.0 and `@jsudc/react` 0.3.0. Needs `@jsudc/core` 0.3.0.
 
 ### Added
 
@@ -24,6 +27,10 @@ Needs `@jsudc/core` with lookups (the same release).
   `checkRegistryLinks`, `assertLookupTarget`.
 - `schema.add_field` accepts `lookup` / `lookup_array` and checks the target;
   `schema.update_field` checks it too.
+
+### Changed
+
+- The `@jsudc/core` peer range (and the development dependency) is `^0.3.0`.
 
 ## [0.2.1] - 2026-10-30
 
@@ -104,7 +111,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/digital-cube/jsudc-server/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/digital-cube/jsudc-server/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/digital-cube/jsudc-server/compare/v0.1.0...v0.1.1
