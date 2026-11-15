@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastif
 import { z } from "zod";
 import { registerBlobRoute } from "./blob.js";
 import type { Dispatcher } from "./dispatcher.js";
+import { checkRegistryLinks } from "./links.js";
 import type { CollectionRegistry } from "./registry.js";
 
 const MESSAGE_ID_HEADER = "x-udc-message-id";
@@ -34,8 +35,14 @@ export interface UdcSwaggerOptions {
 
 export interface UdcPluginOptions {
   dispatcher: Dispatcher;
-  /** With it, `GET /udc/files/blob` serves file previews of filesystem collections. */
+  /**
+   * With it, `GET /udc/files/blob` serves file previews of filesystem
+   * collections, and the plugin checks every lookup and `row_link` against
+   * the active schemas before it serves (`checkRegistryLinks`).
+   */
   registry?: CollectionRegistry | undefined;
+  /** `false` skips that check (a registry whose database is not there yet). Default `true`. */
+  checkLinks?: boolean | undefined;
   /**
    * The OpenAPI document of every action and its UI at `/docs` (default on).
    * Needs the optional peers `@fastify/swagger`, `@fastify/swagger-ui` and
@@ -90,6 +97,7 @@ async function registerSwagger(app: FastifyInstance, opts: UdcSwaggerOptions): P
  */
 export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): Promise<void> {
   const { dispatcher } = opts;
+  if (opts.registry && opts.checkLinks !== false) await checkRegistryLinks(opts.registry);
   const udcPrefix = `${app.prefix}/udc/`;
 
   // Zod schemas on the routes document the API; the dispatcher validates, so a

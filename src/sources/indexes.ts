@@ -4,11 +4,15 @@ import { sql } from "drizzle-orm";
 import type { Executor } from "../db/client.js";
 import { fieldExpr } from "./sql.js";
 
-/** Types with an ordering the query compiler sorts by; `json` and the array types get no index. */
+/**
+ * Types with an ordering the query compiler sorts by (a lookup key sorts as
+ * text); `json` and the array types get no index.
+ */
 const INDEXABLE: ReadonlySet<FieldType> = new Set([
   "string",
   "enum",
   "relation",
+  "lookup",
   "text",
   "integer",
   "decimal",

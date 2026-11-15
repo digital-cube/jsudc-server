@@ -23,6 +23,7 @@ import {
 } from "@jsudc/core";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { assertRegistryLinks } from "./links.js";
 import { assertJsonbSchema } from "./schema-store.js";
 import type { Source } from "./sources/source.js";
 
@@ -198,15 +199,22 @@ export function readCollectionAssets(dir: string): CollectionAsset[] {
  * source made by `makeSource`. A collection for which `makeSource` answers
  * `null` is not served (an http_api one with `UDC_HTTP_SOURCES=off`). The
  * registry is handed to `makeSource` too: a menu lists its collections live.
+ *
+ * Every lookup field and `row_link` is checked against the served
+ * collections' `schema.json` (`assertRegistryLinks`): a target that is not
+ * served, or a field it lacks, stops the start with one message per problem.
+ * `udcPlugin` checks the same against the active schemas.
  */
 export function loadRegistry(
   dir: string,
   makeSource: (asset: CollectionAsset, registry: CollectionRegistry) => Source | null,
 ): CollectionRegistry {
   const registry = new CollectionRegistry();
+  const served: CollectionAsset[] = [];
   for (const asset of readCollectionAssets(dir)) {
     const source = makeSource(asset, registry);
     if (!source) continue;
+    served.push(asset);
     registry.register({
       name: asset.name,
       source,
@@ -214,5 +222,6 @@ export function loadRegistry(
       docs: asset.docs,
     });
   }
+  assertRegistryLinks(served, dir);
   return registry;
 }

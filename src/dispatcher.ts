@@ -13,6 +13,7 @@ import {
 } from "@jsudc/core";
 import type { z } from "zod";
 import { buildDescribe } from "./describe.js";
+import { assertLookupTarget } from "./links.js";
 import type { Collection, CollectionRegistry } from "./registry.js";
 import type { Source } from "./sources/source.js";
 
@@ -190,16 +191,20 @@ export function createDispatcher(
     .register(
       "schema.add_field",
       ACTIONS["schema.add_field"].request,
-      async ({ collection, ...req }) => ({
-        schema: await schemaEditable(registry.get(collection)).addField(req),
-      }),
+      async ({ collection, ...req }) => {
+        const source = schemaEditable(registry.get(collection));
+        await assertLookupTarget(registry, collection, req.name, req.fielddef);
+        return { schema: await source.addField(req) };
+      },
     )
     .register(
       "schema.update_field",
       ACTIONS["schema.update_field"].request,
-      async ({ collection, ...req }) => ({
-        schema: await schemaEditable(registry.get(collection)).updateField(req),
-      }),
+      async ({ collection, ...req }) => {
+        const source = schemaEditable(registry.get(collection));
+        await assertLookupTarget(registry, collection, req.name, req.fielddef);
+        return { schema: await source.updateField(req) };
+      },
     )
     .register(
       "schema.soft_delete_field",

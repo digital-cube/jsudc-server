@@ -14,6 +14,13 @@ export { collectionTable, createCollectionTableSql, udcSchemaRevisions } from ".
 export { buildDescribe, filterableFields } from "./describe.js";
 export { createDispatcher, Dispatcher, type DispatchLogger } from "./dispatcher.js";
 export {
+  assertLookupTarget,
+  assertRegistryLinks,
+  checkRegistryLinks,
+  type LinkedCollection,
+  registryLinkProblems,
+} from "./links.js";
+export {
   type Collection,
   type CollectionAsset,
   CollectionRegistry,

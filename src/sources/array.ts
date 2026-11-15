@@ -3,13 +3,15 @@ import {
   evaluateFilter,
   type FieldType,
   type FilterNode,
+  isRowIdField,
   type ListResponse,
+  ROW_ID,
   type Row,
   type SchemaDoc,
   type SortKey,
   UdcError,
 } from "@jsudc/core";
-import { assertQueryFields, notFound } from "./fields.js";
+import { assertQueryFields, filterFields, notFound } from "./fields.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_PAGE_SIZE,
@@ -96,7 +98,11 @@ export function queryRows(
   schema: SchemaDoc,
   q: ArrayQuery,
 ): { rows: Row[]; total: number } {
-  const matched = rows.filter((r) => evaluateFilter(q.filter, r));
+  // `id` in a filter is the row id when the schema stores no such field (as in SQL).
+  const byId = isRowIdField(schema, ROW_ID) && filterFields(q.filter).includes(ROW_ID);
+  const matched = rows.filter((r) =>
+    evaluateFilter(q.filter, byId ? { ...r, [ROW_ID]: r.__meta.id } : r),
+  );
   const sorted = q.keepOrder && !q.sort?.length ? matched : sortRows(matched, q.sort ?? [], schema);
   const ordered = [...(q.head ?? []), ...sorted];
   const offset = Math.max(0, q.offset ?? 0);

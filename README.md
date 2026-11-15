@@ -76,6 +76,7 @@ and returns the instance, for a server that is nothing but UDC.
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `dispatcher` | `createDispatcher(registry, {log})`; `log.error` receives what fails inside an action                                                                                       |
 | `registry`   | enables `GET /udc/files/blob?collection=&path=`, the file previews of filesystem collections whose view sets `folder_options.preview`                                       |
+| `checkLinks` | with `registry`: check every lookup and `row_link` against the active schemas before serving (`checkRegistryLinks`). Default `true`                                         |
 | `swagger`    | `true` (default), `false`, or `{routePrefix, title, version, description}`. Needs the optional peers `@fastify/swagger`, `@fastify/swagger-ui`, `fastify-type-provider-zod` |
 
 The plugin keeps its validator, serializer and error handler inside its own
@@ -200,6 +201,48 @@ Then seed it (optional): `seedCollection(db, {table: "books", schema:
 asset.schemaJson, rows})` writes `schema.json` as active revision 1, creates the
 field indexes and inserts the rows; `reset: true` truncates first.
 
+## Lookups and drill-down
+
+A `lookup` field stores the key of a row of another collection, a
+`lookup_array` a list of keys (see `@jsudc/core`'s README for the field
+definition). Level 1 adds no JOIN: the server keeps the key in `data` as it
+came (a string or an integer), and sorts and filters on the key.
+
+- **Filter ops.** `eq neq in not_in is_null is_not_null` on a `lookup`; on a
+  `lookup_array`, `in` (any key of the row is in the list), `not_in` (none is)
+  and the null tests. Any other op is `unsupported_op`, and `describe`'s
+  `filterable.fields[].ops` lists exactly these. Keys compare as text, so `7`
+  and `"7"` are the same key.
+- **Sort.** By the key, as text by code point (`"b-10"` before `"b-2"`); a
+  `lookup` with `index: true` gets an expression index like a string.
+- **The row id.** A condition on `id`, in a collection whose schema has no
+  live `id` field, means the row id (the `id` column), with the ops above. That
+  is how a client resolves a lookup keyed by id in one call:
+  `{field: "id", op: "in", value: [...keys]}`. Every source does this, memory
+  and Postgres alike.
+- **Checks at start.** `loadRegistry` checks every lookup field and every
+  view's `row_link` against the served collections' `schema.json`;
+  `udcPlugin` (given `registry`) checks them again against the active schemas,
+  since a revision may have dropped a field. The target must be served and
+  have `label_field`, `key_field` and `extra_fields`; `row_link.filter.field`
+  must exist in the linked collection, `value_from` must be `id` or a field of
+  this one. Any problem stops the start, one line each:
+
+  ```
+  collections: lookups and row links do not fit
+  tickets.board_id: lookup target boards has no field title
+  boards.row_link: value_from colour is neither id nor a field of boards
+  ```
+
+- **Schema edits.** `schema.add_field` accepts `lookup` and `lookup_array`
+  (the flat `ref` + `label_field` form too) and checks the target against its
+  active schema first; `schema.update_field` checks the same. A target that
+  does not fit is a `validation_error`. `relation` is still refused
+  (`unsupported_op`): it is level 2.
+
+`row_link` needs nothing on the server beyond that check: the client opens
+the linked collection with an ordinary `eq` filter.
+
 ## API
 
 | Export                                                                                                   | What                                                                                     |
@@ -216,6 +259,7 @@ field indexes and inserts the rows; `reset: true` truncates first.
 | `seedCollection`                                                                                         | schema revision 1 and the rows of a Postgres collection                                  |
 | `activeSchema`, `writeSchemaRevision`                                                                    | the schema store under the schema edits                                                  |
 | `buildDescribe`, `filterableFields`, `deriveColumns`                                                     | what `describe` answers, for a custom action                                             |
+| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
 | `registerBlobRoute`, `BLOB_ROUTE`                                                                        | the file preview route on its own                                                        |
 | `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar` | the pieces the http_api and filesystem sources are made of                               |
 
