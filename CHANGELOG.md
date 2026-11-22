@@ -7,6 +7,15 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-22
+
+Many rows changed in one request (`mutate_many`) under the caller's context
+and scope, the host's own actions typed end to end, search answered by the
+source and the change feed (notify, a bus across processes, an SSE stream under
+the scope), released together with `@jsudc/core` 0.5.0 and `@jsudc/react`
+0.5.0. Needs `@jsudc/core` 0.5.0. A host that changes nothing keeps 0.4.0's
+behaviour.
+
 ### Added
 
 - The `mutate_many` action (`@jsudc/core`): update or delete many rows in one
@@ -99,8 +108,10 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ### Changed
 
-- `@jsudc/core` devDependency at core's `release-0.5.0` head (the peer stays
-  `^0.4.0` until the release tickets), now `5d01d96` (the change feed: `capabilities.changes`, `ChangeEvent`).
+- The `@jsudc/core` peer range is `^0.5.0` (`mutate_many`, host actions, `ListRequest.search` and the change feed's
+  `ChangeEvent` come from core 0.5.0). The development
+  dependency is pinned to core's `release-0.5.0` commit until core 0.5.0 is on
+  npm.
 
 ## [0.4.0] - 2026-11-22
 
@@ -295,7 +306,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/digital-cube/jsudc-server/compare/v0.2.0...v0.2.1
