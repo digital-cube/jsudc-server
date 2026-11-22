@@ -7,6 +7,12 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-22
+
+Request context and a host-imposed row scope, the `postgres_table` source
+(reads, writes, `onMutate`) and the SQL compiler exported, released together
+with `@jsudc/core` 0.4.0 and `@jsudc/react` 0.4.0. Needs `@jsudc/core` 0.4.0.
+
 ### Added
 
 - Request context: `udcPlugin` option `context(request)` (sync or async). Its
@@ -82,9 +88,13 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
   of `postgres_jsonb` are unchanged).
 - `Source.notFilterable` (optional): fields `describe` leaves out of
   `filterable`.
-- Dev: `@jsudc/core` devDependency pinned to the `release-0.4.0` commit of
-  core (for `unauthenticatedError` / `isUnauthenticated`) until core 0.4.0 is
-  on npm.
+
+### Changed
+
+- The `@jsudc/core` peer range is `^0.4.0` (the request context imports
+  `unauthenticatedError` / `isUnauthenticated`, which only core 0.4.0
+  exports). The development dependency is pinned to core's `release-0.4.0`
+  commit until core 0.4.0 is on npm.
 
 ## [0.3.0] - 2026-11-15
 
@@ -190,7 +200,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/digital-cube/jsudc-server/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/digital-cube/jsudc-server/compare/v0.1.1...v0.2.0

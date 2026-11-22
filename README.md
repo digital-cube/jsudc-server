@@ -28,7 +28,7 @@ npm install @jsudc/server @jsudc/core fastify drizzle-orm pg zod
 # the OpenAPI docs at /docs (on by default):
 npm install @fastify/swagger @fastify/swagger-ui fastify-type-provider-zod
 # or straight from a GitHub tag:
-npm install github:digital-cube/jsudc-core#v0.3.0 github:digital-cube/jsudc-server#v0.3.0
+npm install github:digital-cube/jsudc-core#v0.4.0 github:digital-cube/jsudc-server#v0.4.0
 ```
 
 ## Quick start
