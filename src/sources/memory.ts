@@ -12,6 +12,7 @@ import {
 } from "./fields.js";
 import {
   DEFAULT_ORDER_FIELD,
+  type SourceContext,
   type SourceMutation,
   type SourceReindex,
   type SourceTreeReparent,
@@ -62,11 +63,11 @@ export class MemorySource extends ArraySource {
     return { rows: this.rows.map(serialize) };
   }
 
-  override async read(id: string): Promise<Row> {
+  override async read(id: string, _sctx?: SourceContext): Promise<Row> {
     return serialize(this.find(id));
   }
 
-  override async mutate(m: SourceMutation): Promise<Row> {
+  override async mutate(m: SourceMutation, _sctx?: SourceContext): Promise<Row> {
     if (m.op === "insert") {
       const data = withoutMeta(m.row ?? {});
       assertValidRow(this.schema, data, "insert");
@@ -90,7 +91,7 @@ export class MemorySource extends ArraySource {
     return serialize(stored);
   }
 
-  async reindex(req: SourceReindex): Promise<number> {
+  async reindex(req: SourceReindex, _sctx?: SourceContext): Promise<number> {
     const { filter, orderField } = reindexPlan(
       this.schema,
       req.scope,
@@ -111,7 +112,7 @@ export class MemorySource extends ArraySource {
     return rows.length;
   }
 
-  async reparent(req: SourceTreeReparent): Promise<TreeReparentResult> {
+  async reparent(req: SourceTreeReparent, _sctx?: SourceContext): Promise<TreeReparentResult> {
     const plan = reparentPlan(this.schema, req.fields, req);
     const node = this.find(req.id);
     if (req.expected_version !== undefined && req.expected_version !== node.version) {

@@ -18,8 +18,24 @@ function malformed(): UdcError {
   return new UdcError("validation_error", "malformed cursor", { field: "page.cursor" });
 }
 
-/** Decode a cursor made for `keys` sort keys; anything else is a `validation_error`. */
-export function decodeCursor(cursor: string, keys: number): { values: CursorValue[]; id: string } {
+const INTEGER_ID_RE = /^-?\d{1,19}$/;
+
+/** Whether `v` is a row id of `idType` as a cursor and `read` carry it (a string). */
+export function isIdOfType(v: unknown, idType: "uuid" | "text" | "integer"): v is string {
+  if (idType === "uuid") return isUuid(v);
+  if (idType === "integer") return typeof v === "string" && INTEGER_ID_RE.test(v);
+  return typeof v === "string";
+}
+
+/**
+ * Decode a cursor made for `keys` sort keys whose last part is a row id of
+ * `idType` (`uuid` by default); anything else is a `validation_error`.
+ */
+export function decodeCursor(
+  cursor: string,
+  keys: number,
+  idType: "uuid" | "text" | "integer" = "uuid",
+): { values: CursorValue[]; id: string } {
   let parts: unknown;
   try {
     parts = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
@@ -29,6 +45,8 @@ export function decodeCursor(cursor: string, keys: number): { values: CursorValu
   if (!Array.isArray(parts) || parts.length !== keys + 1) throw malformed();
   const values = parts.slice(0, keys);
   const id = parts[keys];
-  if (!values.every((v) => v === null || typeof v === "string") || !isUuid(id)) throw malformed();
+  if (!values.every((v) => v === null || typeof v === "string") || !isIdOfType(id, idType)) {
+    throw malformed();
+  }
   return { values, id };
 }

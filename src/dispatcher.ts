@@ -12,20 +12,30 @@ import {
   type UdcMessage,
 } from "@jsudc/core";
 import type { z } from "zod";
-import { buildDescribe } from "./describe.js";
 import { assertLookupTarget } from "./links.js";
-import type { Collection, CollectionRegistry } from "./registry.js";
+import type { CollectionRegistry } from "./registry.js";
+import { openCollection, type RowScopeOptions, ScopedCollection } from "./scope.js";
 import type { Source } from "./sources/source.js";
 
 export interface DispatchLogger {
   error(obj: unknown, msg?: string): void;
 }
 
-type Handler<S extends z.ZodType> = (payload: z.output<S>) => unknown;
+/**
+ * An action's handler: the validated payload, and the request context (what
+ * the plugin's `context` hook answered; `undefined` without one, or when
+ * `dispatch` was called without it). A one-argument handler is fine.
+ */
+type Handler<S extends z.ZodType, Ctx> = (payload: z.output<S>, ctx: Ctx) => unknown;
 
 interface Registered {
   schema: z.ZodType;
-  handle: (payload: unknown) => unknown;
+  handle: (payload: unknown, ctx: unknown) => unknown;
+}
+
+/** What a `Dispatcher` is built with: the logger, and the host's row scope and access hooks. */
+export interface DispatcherOptions<Ctx = unknown> extends RowScopeOptions<Ctx> {
+  log: DispatchLogger;
 }
 
 /**
@@ -36,13 +46,28 @@ interface Registered {
 export class Dispatcher {
   private readonly handlers = new Map<string, Registered>();
   private readonly log: DispatchLogger;
+  /** The host's `rowScope`, `access` and `showScopeFields`, for the routes that reach rows outside `dispatch`. */
+  readonly scopeOptions: RowScopeOptions;
 
-  constructor(opts: { log: DispatchLogger }) {
+  constructor(opts: DispatcherOptions) {
     this.log = opts.log;
+    // Bound, so a host may pass an object whose hooks are prototype methods.
+    this.scopeOptions = {
+      ...(opts.rowScope ? { rowScope: opts.rowScope.bind(opts) } : {}),
+      ...(opts.access ? { access: opts.access.bind(opts) } : {}),
+      ...(opts.showScopeFields ? { showScopeFields: opts.showScopeFields } : {}),
+    };
   }
 
-  register<S extends z.ZodType>(action: string, schema: S, handle: Handler<S>): this {
-    this.handlers.set(action, { schema, handle: handle as (payload: unknown) => unknown });
+  register<S extends z.ZodType, Ctx = unknown>(
+    action: string,
+    schema: S,
+    handle: Handler<S, Ctx>,
+  ): this {
+    this.handlers.set(action, {
+      schema,
+      handle: handle as (payload: unknown, ctx: unknown) => unknown,
+    });
     return this;
   }
 
@@ -59,7 +84,12 @@ export class Dispatcher {
     return this.handlers.get(action)?.schema;
   }
 
-  async dispatch(msg: UdcMessage): Promise<UdcMessage> {
+  /**
+   * Answer one request envelope. `ctx` is the request context, handed to the
+   * handler and, through it, to the row scope, the access hook and every
+   * source method; a dispatcher driven without HTTP passes its own.
+   */
+  async dispatch(msg: UdcMessage, ctx?: unknown): Promise<UdcMessage> {
     const parsed = parseKind(msg.kind);
     const action = parsed?.status === "request" ? parsed.action : msg.kind;
     try {
@@ -73,7 +103,7 @@ export class Dispatcher {
           issues: payload.error.issues,
         });
       }
-      const result = await registered.handle(payload.data);
+      const result = await registered.handle(payload.data, ctx);
       return { kind: okKind(action), id: msg.id, payload: result };
     } catch (err) {
       if (isUdcError(err)) return { kind: errKind(action), id: msg.id, payload: err.toPayload() };
@@ -88,7 +118,9 @@ export class Dispatcher {
 }
 
 /** The source of a collection whose schema may be edited, or `unsupported_op`. */
-function schemaEditable(c: Collection): Source {
+function schemaEditable(s: ScopedCollection, action: string): Source {
+  s.assertTenantWide(action);
+  const c = s.collection;
   if (!c.source.capabilities.schema_edit) {
     throw new UdcError(
       "unsupported_op",
@@ -100,7 +132,8 @@ function schemaEditable(c: Collection): Source {
 }
 
 /** The source of a collection that renumbers orders, or `unsupported_op`. */
-function reindexable(c: Collection): Source & Required<Pick<Source, "reindex">> {
+function reindexable(s: ScopedCollection): ScopedCollection {
+  const c = s.collection;
   const { source } = c;
   if (!source.capabilities.reindex || !source.reindex) {
     throw new UdcError(
@@ -109,11 +142,12 @@ function reindexable(c: Collection): Source & Required<Pick<Source, "reindex">> 
       { collection: c.name },
     );
   }
-  return source as Source & Required<Pick<Source, "reindex">>;
+  return s;
 }
 
 /** The source of a collection that moves tree nodes, or `unsupported_op`. */
-function reparentable(c: Collection): Source & Required<Pick<Source, "reparent">> {
+function reparentable(s: ScopedCollection): ScopedCollection {
+  const c = s.collection;
   const { source } = c;
   if (!source.capabilities.tree_reparent || !source.reparent) {
     throw new UdcError(
@@ -122,11 +156,13 @@ function reparentable(c: Collection): Source & Required<Pick<Source, "reparent">
       { collection: c.name },
     );
   }
-  return source as Source & Required<Pick<Source, "reparent">>;
+  return s;
 }
 
 /** The source of a collection read from a file the UI may show, or `unsupported_op`. */
-function sourceReadable(c: Collection): Source & Required<Pick<Source, "readSource">> {
+function sourceReadable(s: ScopedCollection): Source & Required<Pick<Source, "readSource">> {
+  s.assertTenantWide("source.read");
+  const c = s.collection;
   const { source } = c;
   if (!source.capabilities.source_yaml || !source.readSource) {
     throw new UdcError(
@@ -138,88 +174,105 @@ function sourceReadable(c: Collection): Source & Required<Pick<Source, "readSour
   return source as Source & Required<Pick<Source, "readSource">>;
 }
 
-/** A dispatcher with every action wired to the registry. */
-export function createDispatcher(
+/**
+ * A dispatcher with every action wired to the registry. With `rowScope`,
+ * every action holds each request to its row filter whatever the source
+ * (see `ScopedCollection`); with `access`, a host hides collections and lets
+ * a scoped request edit a schema. Without them, nothing changes.
+ */
+export function createDispatcher<Ctx = unknown>(
   registry: CollectionRegistry,
-  opts: { log: DispatchLogger },
+  opts: DispatcherOptions<Ctx>,
 ): Dispatcher {
-  return new Dispatcher(opts)
-    .register(
-      "collections",
-      ACTIONS.collections.request,
-      (): CollectionsResponse => ({
-        collections: registry.list().map((c) => ({
-          name: c.name,
-          ...(c.label === undefined ? {} : { label: c.label }),
-          default_renderer: c.view.default_renderer,
-          capabilities: c.source.capabilities,
-          source_kind: c.source.kind ?? "postgres_jsonb",
-          group: sourceGroup(c.source.kind ?? "postgres_jsonb"),
+  const dispatcher = new Dispatcher(opts as DispatcherOptions);
+  const scoping = dispatcher.scopeOptions;
+  const open = (action: string, collection: string, ctx: unknown) =>
+    openCollection(registry, scoping, action, collection, ctx);
+  return dispatcher
+    .register("collections", ACTIONS.collections.request, (_, ctx): CollectionsResponse => {
+      const collections = registry
+        .list()
+        .filter(
+          (c) => scoping.access?.(ctx, { action: "collections", collection: c.name }) !== false,
+        )
+        .map((c) => new ScopedCollection(c, ctx, scoping));
+      return {
+        collections: collections.map((s) => ({
+          name: s.collection.name,
+          ...(s.collection.label === undefined ? {} : { label: s.collection.label }),
+          default_renderer: s.collection.view.default_renderer,
+          capabilities: s.capabilities(),
+          source_kind: s.source.kind ?? "postgres_jsonb",
+          group: sourceGroup(s.source.kind ?? "postgres_jsonb"),
         })),
-      }),
-    )
-    .register("describe", ACTIONS.describe.request, async ({ collection }) => {
-      const c = registry.get(collection);
-      return buildDescribe(c.name, c.source.capabilities, await c.source.describe(), c.view, {
-        source_kind: c.source.kind ?? "postgres_jsonb",
-        docs: c.docs,
-        source: c.source.info?.(),
-      });
+      };
     })
+    .register("describe", ACTIONS.describe.request, ({ collection }, ctx) =>
+      open("describe", collection, ctx).describe(),
+    )
     .register(
       "list",
       ACTIONS.list.request,
-      ({ collection, filter, sort, page }): Promise<ListResponse> => {
-        const c = registry.get(collection);
-        return c.source.list({
+      ({ collection, filter, sort, page }, ctx): Promise<ListResponse> => {
+        const s = open("list", collection, ctx);
+        return s.list({
           filter,
           sort,
-          page: { ...page, limit: page?.limit ?? c.view.page_size_default },
+          page: { ...page, limit: page?.limit ?? s.collection.view.page_size_default },
         });
       },
     )
     .register(
       "read",
       ACTIONS.read.request,
-      async ({ collection, id }): Promise<ReadResponse> => ({
-        row: await registry.get(collection).source.read(id),
+      async ({ collection, id }, ctx): Promise<ReadResponse> => ({
+        row: await open("read", collection, ctx).read(id),
       }),
     )
-    .register("mutate", ACTIONS.mutate.request, async ({ collection, ...op }) => ({
-      row: await registry.get(collection).source.mutate(op),
+    .register("mutate", ACTIONS.mutate.request, async ({ collection, ...op }, ctx) => ({
+      row: await open("mutate", collection, ctx).mutate(op),
     }))
     .register(
       "schema.add_field",
       ACTIONS["schema.add_field"].request,
-      async ({ collection, ...req }) => {
-        const source = schemaEditable(registry.get(collection));
+      async ({ collection, ...req }, ctx) => {
+        const s = open("schema.add_field", collection, ctx);
+        const source = schemaEditable(s, "schema.add_field");
         await assertLookupTarget(registry, collection, req.name, req.fielddef);
-        return { schema: await source.addField(req) };
+        return { schema: await source.addField(req, s.sctx) };
       },
     )
     .register(
       "schema.update_field",
       ACTIONS["schema.update_field"].request,
-      async ({ collection, ...req }) => {
-        const source = schemaEditable(registry.get(collection));
+      async ({ collection, ...req }, ctx) => {
+        const s = open("schema.update_field", collection, ctx);
+        const source = schemaEditable(s, "schema.update_field");
         await assertLookupTarget(registry, collection, req.name, req.fielddef);
-        return { schema: await source.updateField(req) };
+        return { schema: await source.updateField(req, s.sctx) };
       },
     )
     .register(
       "schema.soft_delete_field",
       ACTIONS["schema.soft_delete_field"].request,
-      async ({ collection, field }) => ({
-        schema: await schemaEditable(registry.get(collection)).softDeleteField(field),
-      }),
+      async ({ collection, field }, ctx) => {
+        const s = open("schema.soft_delete_field", collection, ctx);
+        return {
+          schema: await schemaEditable(s, "schema.soft_delete_field").softDeleteField(
+            field,
+            s.sctx,
+          ),
+        };
+      },
     )
-    .register("reindex", ACTIONS.reindex.request, async ({ collection, ...req }) => ({
-      updated: await reindexable(registry.get(collection)).reindex(req),
+    .register("reindex", ACTIONS.reindex.request, async ({ collection, ...req }, ctx) => ({
+      updated: await reindexable(open("reindex", collection, ctx)).reindex(req),
     }))
-    .register("tree.reparent", ACTIONS["tree.reparent"].request, ({ collection, ...req }) =>
-      reparentable(registry.get(collection)).reparent(req),
+    .register("tree.reparent", ACTIONS["tree.reparent"].request, ({ collection, ...req }, ctx) =>
+      reparentable(open("tree.reparent", collection, ctx)).reparent(req),
     )
-    .register("source.read", ACTIONS["source.read"].request, ({ collection }) =>
-      sourceReadable(registry.get(collection)).readSource(),
-    );
+    .register("source.read", ACTIONS["source.read"].request, ({ collection }, ctx) => {
+      const s = open("source.read", collection, ctx);
+      return sourceReadable(s).readSource(s.sctx);
+    });
 }

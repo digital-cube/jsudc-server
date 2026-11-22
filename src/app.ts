@@ -1,5 +1,17 @@
-import { ACTIONS, ErrorPayloadSchema, errKind, isActionName, requestKind } from "@jsudc/core";
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from "fastify";
+import {
+  ACTIONS,
+  ErrorPayloadSchema,
+  errKind,
+  isActionName,
+  isUdcError,
+  requestKind,
+  type UdcMessage,
+} from "@jsudc/core";
+import Fastify, {
+  type FastifyInstance,
+  type FastifyRequest,
+  type FastifyServerOptions,
+} from "fastify";
 import { z } from "zod";
 import { registerBlobRoute } from "./blob.js";
 import type { Dispatcher } from "./dispatcher.js";
@@ -49,6 +61,17 @@ export interface UdcPluginOptions {
    * `fastify-type-provider-zod`; `false` leaves them out.
    */
   swagger?: boolean | UdcSwaggerOptions | undefined;
+  /**
+   * Who is asking: called once per request (`POST /udc/:action` and the
+   * file preview route), its answer handed to `Dispatcher.dispatch` and from
+   * there to every handler, the dispatcher's `rowScope` / `access` hooks and
+   * every source method. Throw a `UdcError` to refuse the request —
+   * `unauthenticatedError()` of `@jsudc/core` for "not signed in": the
+   * action answers it in-protocol (HTTP 200, `.err` envelope), the file
+   * route with HTTP 401 (unauthenticated) or 403. Anything else thrown is
+   * `internal`, logged, its message not sent.
+   */
+  context?(request: FastifyRequest): unknown;
 }
 
 const DEFAULT_DESCRIPTION =
@@ -108,8 +131,28 @@ export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): P
   const swagger = opts.swagger ?? true;
   if (swagger !== false) await registerSwagger(app, swagger === true ? {} : swagger);
 
-  const handle = async (action: string, body: unknown, header: string | string[] | undefined) =>
-    dispatcher.dispatch({ kind: requestKind(action), id: messageId(header), payload: body ?? {} });
+  const handle = async (action: string, request: FastifyRequest): Promise<UdcMessage> => {
+    const msg: UdcMessage = {
+      kind: requestKind(action),
+      id: messageId(request.headers[MESSAGE_ID_HEADER]),
+      payload: request.body ?? {},
+    };
+    if (!opts.context) return dispatcher.dispatch(msg);
+    let ctx: unknown;
+    try {
+      ctx = await opts.context(request);
+    } catch (err) {
+      // A refusal is answered like any action error: in-protocol, HTTP 200.
+      if (isUdcError(err)) return { kind: errKind(action), id: msg.id, payload: err.toPayload() };
+      request.log.error({ err, action }, "udc context failed");
+      return {
+        kind: errKind(action),
+        id: msg.id,
+        payload: { code: "internal", message: "internal error" },
+      };
+    }
+    return dispatcher.dispatch(msg, ctx);
+  };
 
   // A body Fastify cannot parse (bad JSON, wrong content type) is still answered in-protocol.
   app.setErrorHandler((err: { statusCode?: number; message: string }, request, reply) => {
@@ -133,7 +176,12 @@ export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): P
   });
 
   app.get("/healthz", { schema: { hide: true } }, async () => ({ ok: true }));
-  if (opts.registry) registerBlobRoute(app, opts.registry);
+  if (opts.registry) {
+    registerBlobRoute(app, opts.registry, {
+      context: opts.context?.bind(opts),
+      scope: dispatcher.scopeOptions,
+    });
+  }
 
   for (const action of dispatcher.actions()) {
     app.post(
@@ -147,13 +195,13 @@ export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): P
           response: { 200: envelopeDoc(action) },
         },
       },
-      (request) => handle(action, request.body, request.headers[MESSAGE_ID_HEADER]),
+      (request) => handle(action, request),
     );
   }
 
   // Anything else under /udc: the dispatcher answers `unsupported_op`.
   app.post<{ Params: { action: string } }>("/udc/:action", { schema: { hide: true } }, (request) =>
-    handle(request.params.action, request.body, request.headers[MESSAGE_ID_HEADER]),
+    handle(request.params.action, request),
   );
 }
 

@@ -15,6 +15,7 @@ import {
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./array.js";
+import type { SourceContext } from "./source.js";
 
 /** One collection of the live registry, as a `udc:collections` branch lists it. */
 export interface MenuCollection {
@@ -221,7 +222,7 @@ export class YamlMenuSource extends ArraySource {
   }
 
   /** The file as written, for the Source tab; `error` when it no longer parses. */
-  async readSource(): Promise<SourceReadResponse> {
+  async readSource(_sctx?: SourceContext): Promise<SourceReadResponse> {
     let text: string;
     let mtime: Date;
     try {

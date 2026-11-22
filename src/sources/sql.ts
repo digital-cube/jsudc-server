@@ -15,12 +15,47 @@ import type { CursorValue } from "./cursor.js";
 import { allowedCondition, allowedField } from "./fields.js";
 
 // Every function here takes field names only after `allowedField` let them
-// through (schema allowlist + FIELD_NAME_RE), so writing them into the SQL
-// text as `data->>'<field>'` is safe. Values always travel as parameters.
+// through (schema allowlist + FIELD_NAME_RE), so a resolver may write them
+// into the SQL text (the jsonb one as `data->>'<field>'`). Values always
+// travel as parameters.
 
-type Cast = "numeric" | "date" | "timestamptz" | "boolean" | "text";
+/** The type a filter value and a cursor value are cast to (`$1::numeric`), from the field's type. */
+export type SqlCast = "numeric" | "date" | "timestamptz" | "boolean" | "text";
+type Cast = SqlCast;
 
-function castFor(def: FieldDef): Cast {
+/** The type of a row id: a cursor carries the id, `read` and the tiebreaker compare it in this type. */
+export type SqlIdType = "uuid" | "text" | "integer";
+
+/**
+ * How an array field (`string_array`, `lookup_array`) is stored: a jsonb
+ * array (`postgres_jsonb`'s `data->'f'`) or a Postgres array (`text[]`; any
+ * element type, compared as text).
+ */
+export type SqlArrayForm = "jsonb" | "text[]";
+
+/**
+ * Where the compiler finds a field and the row id in SQL. The compiler is the
+ * same for every SQL source; only the resolver knows the storage. It is called
+ * only for fields the allowlist let through (a live schema field, `FIELD_NAME_RE`).
+ */
+export interface FieldResolver {
+  /** The text form of a field: `contains` / `starts_with` / `ends_with`, `is_null`, case-insensitive comparisons. */
+  text(field: string, def: FieldDef): SQL;
+  /**
+   * The typed form: comparisons, `ORDER BY`, the keyset cursor. Compared with
+   * parameters cast to `cast` (`sqlCastFor(def)`); a text form must compare by
+   * code point (`codePointOrder`) for results to agree with `evaluateFilter`.
+   */
+  typed(field: string, def: FieldDef, cast: SqlCast): SQL;
+  /** An array field's value and how it is stored. */
+  array(field: string, def: FieldDef): { expr: SQL; form: SqlArrayForm };
+  /** The row id: the `ORDER BY` tiebreaker, the cursor's last key, the `id` filter. */
+  readonly id: SQL;
+  readonly idType: SqlIdType;
+}
+
+/** The cast a field's filter values and cursor values take, by its type. */
+export function sqlCastFor(def: FieldDef): SqlCast {
   switch (def.type) {
     case "integer":
     case "decimal":
@@ -37,6 +72,8 @@ function castFor(def: FieldDef): Cast {
   }
 }
 
+const castFor = sqlCastFor;
+
 /** `data->>'f'`: the text form, used by the text ops and `is_null`. */
 function textExpr(field: string): SQL {
   return sql.raw(`(data->>'${field}')`);
@@ -48,9 +85,11 @@ function textExpr(field: string): SQL {
  * (`en_US.utf8`, the postgres image's default) `'beta' > 'Gama'` would hold
  * in SQL and not in memory.
  */
-function codePoint(expr: SQL): SQL {
+export function codePointOrder(expr: SQL): SQL {
   return sql`(${expr} COLLATE "C")`;
 }
+
+const codePoint = codePointOrder;
 
 /**
  * The typed expression comparisons and ORDER BY use, and the expression
@@ -74,6 +113,25 @@ function typedExpr(field: string, cast: Cast): SQL {
 /** The typed expression of an allowlisted field (see `typedExpr`). */
 export function fieldExpr(field: string, def: FieldDef): SQL {
   return typedExpr(field, castFor(def));
+}
+
+/**
+ * The resolver of `postgres_jsonb`: every field in `data jsonb`, a uuid `id`
+ * column. Its SQL text is the one the expression indexes are built on.
+ */
+export const jsonbResolver: FieldResolver = {
+  text: (field) => textExpr(field),
+  typed: (field, _def, cast) => typedExpr(field, cast),
+  array: (field) => ({ expr: sql.raw(`(data->'${field}')`), form: "jsonb" }),
+  id: sql.raw("id"),
+  idType: "uuid",
+};
+
+const ID_CAST: Record<SqlIdType, string> = { uuid: "uuid", text: "text", integer: "bigint" };
+
+/** A row id as a parameter of its type (`$1::uuid`, `$1::bigint`, `$1::text`). */
+export function idParam(id: string, idType: SqlIdType): SQL {
+  return sql`${id}::${sql.raw(ID_CAST[idType])}`;
 }
 
 function param(value: unknown, cast: Cast): SQL {
@@ -136,9 +194,9 @@ const ARRAY_TYPES: ReadonlySet<FieldDef["type"]> = new Set(["string_array", "loo
  * when none is in the list), as in evaluateFilter. A row without the field
  * stays UNKNOWN.
  */
-function compileArrayCondition(cond: Condition): SQL {
+function compileArrayCondition(cond: Condition, def: FieldDef, resolve: FieldResolver): SQL {
   const { field, op, value } = cond;
-  const arr = sql.raw(`(data->'${field}')`);
+  const { expr: arr, form } = resolve.array(field, def);
   const ci = cond.case_insensitive === true;
   const el = sql.raw(ci ? "lower(e.el)" : "e.el");
   let test: SQL;
@@ -161,16 +219,23 @@ function compileArrayCondition(cond: Condition): SQL {
       op,
     });
   }
+  if (form === "text[]") {
+    // Any element type, compared as text, as the jsonb elements are.
+    const elems = sql`(SELECT u.v::text AS el FROM unnest(${arr}) AS u(v)) AS e`;
+    const exists = sql`EXISTS (SELECT 1 FROM ${elems} WHERE ${test})`;
+    return sql`(CASE WHEN ${arr} IS NOT NULL THEN ${op === "not_in" ? sql`NOT ${exists}` : exists} ELSE NULL END)`;
+  }
   const exists = sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${arr}) AS e(el) WHERE ${test})`;
   return sql`(CASE WHEN jsonb_typeof(${arr}) = 'array' THEN ${op === "not_in" ? sql`NOT ${exists}` : exists} ELSE NULL END)`;
 }
 
-function compileCondition(cond: Condition, def: FieldDef): SQL {
+function compileCondition(cond: Condition, def: FieldDef, resolve: FieldResolver): SQL {
   const { field, op, value } = cond;
+  const asText = resolve.text(field, def);
 
-  if (op === "is_null") return sql`(${textExpr(field)} IS NULL)`;
-  if (op === "is_not_null") return sql`(${textExpr(field)} IS NOT NULL)`;
-  if (ARRAY_TYPES.has(def.type)) return compileArrayCondition(cond);
+  if (op === "is_null") return sql`(${asText} IS NULL)`;
+  if (op === "is_not_null") return sql`(${asText} IS NOT NULL)`;
+  if (ARRAY_TYPES.has(def.type)) return compileArrayCondition(cond, def, resolve);
 
   if (op === "contains" || op === "starts_with" || op === "ends_with") {
     if (isMissing(value)) return NULL;
@@ -178,14 +243,14 @@ function compileCondition(cond: Condition, def: FieldDef): SQL {
     const pattern =
       op === "contains" ? `%${text}%` : op === "starts_with" ? `${text}%` : `%${text}`;
     const like = sql.raw(cond.case_insensitive ? "ILIKE" : "LIKE");
-    return sql`(${textExpr(field)} ${like} ${pattern}::text)`;
+    return sql`(${asText} ${like} ${pattern}::text)`;
   }
 
   const cast = castFor(def);
   // case_insensitive only means something for text comparisons, as in evaluateFilter.
   const ci = cond.case_insensitive === true && cast === "text";
   // lower() under the database's collation (a "C" lower() folds ASCII only), then code point order.
-  const lhs = ci ? codePoint(sql`lower(${textExpr(field)})`) : typedExpr(field, cast);
+  const lhs = ci ? codePoint(sql`lower(${asText})`) : resolve.typed(field, def, cast);
   const rhs = (v: unknown) => {
     const p = param(coerce(v, cast, field, op), cast);
     return ci ? sql`lower(${p})` : p;
@@ -223,9 +288,9 @@ function compileCondition(cond: Condition, def: FieldDef): SQL {
  * `id` column as text, so a malformed id is a miss, not a cast error.
  * `allowedCondition` already limited the op to eq neq in not_in and the nulls.
  */
-function compileIdCondition(cond: Condition): SQL {
+function compileIdCondition(cond: Condition, resolve: FieldResolver): SQL {
   const { field, op, value } = cond;
-  const id = sql.raw("(id::text)");
+  const id = sql`(${resolve.id}::text)`;
   if (op === "is_null") return sql`(${id} IS NULL)`;
   if (op === "is_not_null") return sql`(${id} IS NOT NULL)`;
   if (op === "eq" || op === "neq") {
@@ -238,50 +303,66 @@ function compileIdCondition(cond: Condition): SQL {
   return op === "in" ? sql`(${id} = ANY(${arr}))` : sql`(${id} <> ALL(${arr}))`;
 }
 
-/** A filter tree as a WHERE expression, with SQL's three-valued logic (which evaluateFilter mirrors). */
-export function compileFilter(node: FilterNode | null | undefined, schema: SchemaDoc): SQL {
+/**
+ * A filter tree as a WHERE expression, with SQL's three-valued logic (which
+ * evaluateFilter mirrors). Every field passes the allowlist of `schema`
+ * first (an unknown one is a `validation_error`, a value of the wrong type
+ * too); `resolve` says where the fields live (`jsonbResolver` by default).
+ */
+export function compileFilter(
+  node: FilterNode | null | undefined,
+  schema: SchemaDoc,
+  resolve: FieldResolver = jsonbResolver,
+): SQL {
   if (!node) return sql`TRUE`;
   if (isCondition(node)) {
     const def = allowedCondition(schema, node);
-    return def ? compileCondition(node, def) : compileIdCondition(node);
+    return def ? compileCondition(node, def, resolve) : compileIdCondition(node, resolve);
   }
   if ("and" in node) {
     if (node.and.length === 0) return sql`TRUE`;
     return sql`(${sql.join(
-      node.and.map((n) => compileFilter(n, schema)),
+      node.and.map((n) => compileFilter(n, schema, resolve)),
       sql` AND `,
     )})`;
   }
   if ("or" in node) {
     if (node.or.length === 0) return sql`FALSE`;
     return sql`(${sql.join(
-      node.or.map((n) => compileFilter(n, schema)),
+      node.or.map((n) => compileFilter(n, schema, resolve)),
       sql` OR `,
     )})`;
   }
-  return sql`(NOT ${compileFilter(node.not, schema)})`;
+  return sql`(NOT ${compileFilter(node.not, schema, resolve)})`;
 }
 
+/** One compiled sort key: its typed expression, and the cast its cursor value takes. */
 export interface SortTerm {
   field: string;
   dir: SortDir;
-  cast: Cast;
+  cast: SqlCast;
   expr: SQL;
 }
 
-export function compileSort(sort: SortKey[] | undefined, schema: SchemaDoc): SortTerm[] {
+/** The sort keys allowlisted against `schema` and resolved to typed expressions. */
+export function compileSort(
+  sort: SortKey[] | undefined,
+  schema: SchemaDoc,
+  resolve: FieldResolver = jsonbResolver,
+): SortTerm[] {
   return (sort ?? []).map(({ field, dir }) => {
-    const cast = castFor(allowedField(schema, field, "sort"));
-    return { field, dir: dir ?? "asc", cast, expr: typedExpr(field, cast) };
+    const def = allowedField(schema, field, "sort");
+    const cast = castFor(def);
+    return { field, dir: dir ?? "asc", cast, expr: resolve.typed(field, def, cast) };
   });
 }
 
-/** `ORDER BY` the requested keys, NULLS LAST both ways, then `id ASC` as the tiebreaker. */
-export function orderBy(terms: SortTerm[]): SQL {
+/** `ORDER BY` the requested keys, NULLS LAST both ways, then the row id ascending as the tiebreaker. */
+export function orderBy(terms: SortTerm[], resolve: FieldResolver = jsonbResolver): SQL {
   const keys = terms.map(
     (t) => sql`${t.expr} ${sql.raw(t.dir === "desc" ? "DESC" : "ASC")} NULLS LAST`,
   );
-  return sql.join([...keys, sql`id ASC`], sql`, `);
+  return sql.join([...keys, sql`${resolve.id} ASC`], sql`, `);
 }
 
 /** The sort values as text, selected next to each row so the next cursor can be built. */
@@ -301,7 +382,8 @@ function or(parts: SQL[]): SQL {
 }
 
 /**
- * Rows strictly after the cursor position in `ORDER BY terms…, id ASC` with
+ * Rows strictly after the cursor position in `ORDER BY terms…, id ASC` (the
+ * resolver's id) with
  * NULLS LAST. When every key runs the same direction and the cursor has no
  * missing value this is the row comparison `(e1, …, id) > ($1, …, $id)`
  * (for all-desc `(e1, …, $id) < ($1, …, id)`, which keeps the id ascending),
@@ -309,9 +391,15 @@ function or(parts: SQL[]): SQL {
  * directions, or a cursor sitting in a NULL tail) it is the lexicographic
  * expansion `k1 after v1 OR (k1 = v1 AND k2 after v2) OR …`.
  */
-export function cursorPredicate(terms: SortTerm[], values: CursorValue[], id: string): SQL {
+export function cursorPredicate(
+  terms: SortTerm[],
+  values: CursorValue[],
+  id: string,
+  resolve: FieldResolver = jsonbResolver,
+): SQL {
   const value = (i: number) => param(values[i], (terms[i] as SortTerm).cast);
-  const idParam = sql`${id}::uuid`;
+  const idCol = resolve.id;
+  const idParam_ = idParam(id, resolve.idType);
   const equal = (i: number) =>
     values[i] === null ? sql`(${terms[i]?.expr} IS NULL)` : sql`(${terms[i]?.expr} = ${value(i)})`;
   const prefixEqual = (i: number) => terms.slice(0, i).map((_, j) => equal(j));
@@ -326,8 +414,8 @@ export function cursorPredicate(terms: SortTerm[], values: CursorValue[], id: st
     );
     const rowCompare =
       dir === "desc"
-        ? sql`((${exprs}, ${idParam}) < (${params}, id))`
-        : sql`((${exprs}, id) > (${params}, ${idParam}))`;
+        ? sql`((${exprs}, ${idParam_}) < (${params}, ${idCol}))`
+        : sql`((${exprs}, ${idCol}) > (${params}, ${idParam_}))`;
     // A NULL key sorts after every value of that key once the keys before it tie.
     const tails = terms.map((t, i) => and([...prefixEqual(i), sql`(${t.expr} IS NULL)`]));
     return or([rowCompare, ...tails]);
@@ -341,6 +429,6 @@ export function cursorPredicate(terms: SortTerm[], values: CursorValue[], id: st
     const after = sql`(${t.expr} ${cmp} ${value(i)} OR ${t.expr} IS NULL)`;
     terms_.push(and([...prefixEqual(i), after]));
   });
-  terms_.push(and([...prefixEqual(terms.length), sql`(id > ${idParam})`]));
+  terms_.push(and([...prefixEqual(terms.length), sql`(${idCol} > ${idParam_})`]));
   return or(terms_);
 }

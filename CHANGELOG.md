@@ -7,6 +7,95 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-22
+
+Request context and a host-imposed row scope, the `postgres_table` source
+(reads, writes, `onMutate`) and the SQL compiler exported, released together
+with `@jsudc/core` 0.4.0 and `@jsudc/react` 0.4.0. Needs `@jsudc/core` 0.4.0.
+
+### Added
+
+- Request context: `udcPlugin` option `context(request)` (sync or async). Its
+  value travels through `Dispatcher.dispatch(msg, ctx?)` (new optional
+  argument) to every handler — `register` handlers get `(payload, ctx)`, a
+  one-argument handler still works — and to every `Source` method as a
+  trailing optional `SourceContext` (`{ctx, collection, rowScope?}`); every
+  shipped source accepts it. A `UdcError` thrown by `context` refuses the
+  request in-protocol (HTTP 200, `.err`); the file preview route answers 401
+  (unauthenticated) / 403. Anything else is `internal`, logged, not leaked.
+- Host-imposed row scope: `createDispatcher` options `rowScope(ctx,
+  collection)`, `access(ctx, {action, collection})` and `showScopeFields`
+  (`DispatcherOptions`, `RowScopeOptions`, `AccessRequest`). One generic layer
+  (`ScopedCollection`, `openCollection`) holds every source to the scope on
+  `list` (total and both pagings in scope), `read` and `mutate` (outside →
+  `not_found`, identical to a missing id), insert / patch (top-level `eq`
+  values pinned; a row still outside → `forbidden`, `reason: "out_of_scope"`),
+  `reindex` (ANDed with the request's `scope`) and `tree.reparent`;
+  `postgres_jsonb` also enforces it inside its SQL (`Source.enforcesRowScope`).
+  The scope's fields are hidden from `describe` and the rows unless the
+  collection is in `showScopeFields`. `schema.*` and `source.read` on a scoped
+  collection are `forbidden` unless `access` answers `true`; `access: false`
+  hides a collection (`collections`, `not_found`). `GET /udc/files/blob` runs
+  `context`, `access` and the scope (404 outside).
+- `registerBlobRoute(app, registry, opts?)`: optional `BlobRouteOptions`
+  (`context`, `scope`). Helpers `andFilters`, `rowScopePins`, `withoutFields`,
+  `describeWithout`, `TENANT_WIDE_ACTIONS`.
+- `postgres_table` source (`PostgresTableSource`, `PostgresTableSourceOptions`,
+  `TableFieldSpec`), read side: a collection served from an ordinary relational
+  table with typed columns, or a `FROM` with joins given in code, through the
+  same filter / sort / keyset-cursor / offset compiler as `postgres_jsonb`.
+  Field → column or SQL expression (a computed field, e.g. a count from a join,
+  lists, sorts and filters; `filterable: false` / `sortable: false` refuse it
+  like an unknown field), id column of type `uuid` (default), `text` or
+  `integer`, optional version column, a base `where`, `totalCount: false` (no
+  `count(*)`, `total: null`, `capabilities.total_count: false`). The row scope
+  is compiled into the `WHERE` of `list` and `read`. `capabilities`:
+  `schema_edit`, `reindex`, `tree_reparent` false. `makeSource` builds it for
+  `kind: postgres_table` in `source.yaml` (table, id / version columns, field →
+  column names, `total_count`).
+- `postgres_table` writes: `mutate` inserts, updates (partial patch) and
+  deletes rows of the source's `table`, or of `writeTable` (with
+  `writeAlias`) under a `from` with joins; a `from` without one stays
+  read-only (`capabilities.mutate: false`, `unsupported_op`), as does any
+  source with `readOnly: true`. Only plain mapped columns are written: a
+  computed field, a column marked `readOnly` (`TableFieldSpec.readOnly`) or a
+  column of another table of the `from` in an insert or patch is refused with
+  `validation_error` naming it (`source.readOnlyFields`). With a
+  `versionColumn`, every update increments it and `expected_version` is
+  checked with the row locked (`version_conflict`, `details.current_version`);
+  without one the version is always `1` and `expected_version` is accepted and
+  not checked (no optimistic locking). The row scope is in the `WHERE` of
+  update and delete (outside → `not_found`), its `eq` values are forced on
+  insert, and the written row is read back through the `from` (outside the
+  scope or the base `where` → `forbidden`, rolled back). Every write is one
+  transaction.
+- `onMutate(ctx, change, tx)`, an option of `PostgresTableSource` and
+  `PostgresJsonbSource` (`OnMutateHook`, `OnMutateResult`, `RowChange`): a
+  host's own write on every mutation, run inside the transaction after the
+  source's statement and before `COMMIT`, with the row locked. `change` is `{
+  op, collection, id, before, after, patch }`, `tx` an executor on the same
+  transaction. A returned row is what the caller receives. A throw rolls
+  everything back: a `UdcError` reaches the caller as it is, anything else is
+  `internal` and logged. Without the option `postgres_jsonb` issues the same
+  statements as before, with no transaction added.
+- The SQL compiler is exported, around a field resolver: `compileFilter(node,
+  schema, resolve?)`, `compileSort`, `orderBy`, `sortKeyColumns`,
+  `cursorPredicate`, `encodeCursor`, `decodeCursor(cursor, keys, idType?)`,
+  `escapeLike`, `FieldResolver`, `jsonbResolver`, `columnResolver`, `SortTerm`,
+  `SqlCast`, `SqlIdType`, `SqlArrayForm`, `sqlCastFor`, `codePointOrder`,
+  `idParam`, `CursorValue`. Every `resolve` defaults to `jsonbResolver`, which
+  writes exactly the SQL text of 0.3.0 (the expression indexes and query plans
+  of `postgres_jsonb` are unchanged).
+- `Source.notFilterable` (optional): fields `describe` leaves out of
+  `filterable`.
+
+### Changed
+
+- The `@jsudc/core` peer range is `^0.4.0` (the request context imports
+  `unauthenticatedError` / `isUnauthenticated`, which only core 0.4.0
+  exports). The development dependency is pinned to core's `release-0.4.0`
+  commit until core 0.4.0 is on npm.
+
 ## [0.3.0] - 2026-11-15
 
 Lookups, level 1, on the server side, released together with `@jsudc/core`
@@ -111,7 +200,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/digital-cube/jsudc-server/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/digital-cube/jsudc-server/compare/v0.1.1...v0.2.0

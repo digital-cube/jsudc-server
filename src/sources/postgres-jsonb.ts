@@ -1,6 +1,7 @@
 import {
   type Capabilities,
   FIELD_NAME_RE,
+  type FilterNode,
   type ListResponse,
   ORDER_GAP,
   type Row,
@@ -11,6 +12,7 @@ import { type SQL, sql } from "drizzle-orm";
 import type { Db, Executor } from "../db/client.js";
 import { applySchemaEdit, type SchemaEdit } from "../schema-edit.js";
 import { activeSchema, assertJsonbSchema, writeSchemaRevision } from "../schema-store.js";
+import { andFilters } from "../scope.js";
 import { type CursorValue, decodeCursor, encodeCursor, isUuid } from "./cursor.js";
 import {
   assertQueryFields,
@@ -23,12 +25,14 @@ import {
   versionConflict,
   withoutMeta,
 } from "./fields.js";
+import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_ORDER_FIELD,
   DEFAULT_PAGE_SIZE,
   type Source,
   type SourceAddField,
+  type SourceContext,
   type SourceListRequest,
   type SourceMutation,
   type SourceReindex,
@@ -51,6 +55,11 @@ interface DbRow extends Record<string, unknown> {
   data: Record<string, unknown>;
 }
 
+/** A written row, with whether it is inside the row scope (absent when there is none). */
+interface ScopedRow extends DbRow {
+  __in_scope?: boolean;
+}
+
 export interface PostgresJsonbSourceOptions {
   db: Db;
   /** The collection's table; also its name in `udc_schema_revisions`. */
@@ -58,6 +67,12 @@ export interface PostgresJsonbSourceOptions {
   /** `schema.json`: served until a revision is active. */
   initialSchema: SchemaDoc;
   pageSizeDefault?: number;
+  /**
+   * A host's own write on every mutation: with it, each mutation runs in a
+   * transaction, and the hook runs after the source's statement and before
+   * `COMMIT`; see `OnMutateHook`. Without it the statements are those of 0.3.0.
+   */
+  onMutate?(ctx: unknown, change: RowChange, tx: Executor): OnMutateResult;
 }
 
 /**
@@ -67,6 +82,8 @@ export interface PostgresJsonbSourceOptions {
  */
 export class PostgresJsonbSource implements Source {
   readonly kind = "postgres_jsonb";
+  /** The row scope sits in the WHERE of every statement: the check and the write are one. */
+  readonly enforcesRowScope = true;
   readonly capabilities: Capabilities = {
     mutate: true,
     subscribe: false,
@@ -85,6 +102,7 @@ export class PostgresJsonbSource implements Source {
   private readonly table: ReturnType<typeof sql.identifier>;
   private readonly initialSchema: SchemaDoc;
   private readonly pageSizeDefault: number;
+  private readonly onMutate: PostgresJsonbSourceOptions["onMutate"];
 
   constructor(opts: PostgresJsonbSourceOptions) {
     if (!FIELD_NAME_RE.test(opts.table)) {
@@ -98,19 +116,21 @@ export class PostgresJsonbSource implements Source {
     this.table = sql.identifier(opts.table);
     this.initialSchema = opts.initialSchema;
     this.pageSizeDefault = opts.pageSizeDefault ?? DEFAULT_PAGE_SIZE;
+    this.onMutate = opts.onMutate;
   }
 
-  async describe(): Promise<SchemaDoc> {
+  async describe(_sctx?: SourceContext): Promise<SchemaDoc> {
     const schema = (await activeSchema(this.db, this.name)) ?? this.initialSchema;
     assertJsonbSchema(schema, `active schema of ${this.name}`);
     return schema;
   }
 
-  async list(req: SourceListRequest): Promise<ListResponse> {
+  async list(req: SourceListRequest, sctx?: SourceContext): Promise<ListResponse> {
     const schema = await this.describe();
     // Everything that can be refused is refused before any query runs.
     assertQueryFields(schema, req.filter, req.sort);
-    const where = compileFilter(req.filter, schema);
+    // The row scope is ANDed in, so the total and both pagings count in-scope rows only.
+    const where = compileFilter(andFilters(sctx?.rowScope, req.filter), schema);
     const terms = compileSort(req.sort, schema);
     const limit = req.page?.limit ?? this.pageSizeDefault;
     const cursor = req.page?.cursor;
@@ -143,25 +163,78 @@ export class PostgresJsonbSource implements Source {
     return { rows: page.map(serialize), next_cursor, total: count.rows[0]?.total ?? 0 };
   }
 
-  async read(id: string): Promise<Row> {
+  async read(id: string, sctx?: SourceContext): Promise<Row> {
     if (!isUuid(id)) throw notFound(id);
+    const scope = await this.scopeSql(sctx);
     const res = await this.db.execute<DbRow>(
-      sql`SELECT id, version, data FROM ${this.table} WHERE id = ${id}::uuid`,
+      sql`SELECT id, version, data FROM ${this.table} WHERE id = ${id}::uuid AND ${scope}`,
     );
     const row = res.rows[0];
     if (!row) throw notFound(id);
     return serialize(row);
   }
 
-  async mutate(m: SourceMutation): Promise<Row> {
+  async mutate(m: SourceMutation, sctx?: SourceContext): Promise<Row> {
     const schema = await this.describe();
+    const rowScope = sctx?.rowScope;
+    const hook = this.onMutate;
+    if (hook) {
+      const scope = rowScope ? compileFilter(rowScope, schema) : sql`TRUE`;
+      return this.db.transaction(async (tx) => {
+        // The row as it was, locked until COMMIT; the write below decides not_found / conflict.
+        const before =
+          m.op !== "insert" && m.id !== undefined && isUuid(m.id)
+            ? await this.lockRow(tx, m.id, scope)
+            : null;
+        const written = await this.write(tx, schema, m, scope, rowScope);
+        const change: RowChange = {
+          op: m.op,
+          collection: sctx?.collection ?? this.name,
+          id: written.__meta.id,
+          before: m.op === "insert" ? null : (before ?? written),
+          after: m.op === "delete" ? null : written,
+          patch: m.op === "delete" ? null : withoutMeta(m.row ?? {}),
+        };
+        return runOnMutate(hook, sctx, change, tx);
+      });
+    }
+    // Under a row scope, the written row must still be inside it: checked on the
+    // RETURNING row, in a transaction that rolls the write back when it is not.
+    if (rowScope) {
+      const scope = compileFilter(rowScope, schema);
+      return this.db.transaction((tx) => this.write(tx, schema, m, scope, rowScope));
+    }
+    return this.write(this.db, schema, m, sql`TRUE`, undefined);
+  }
+
+  private async write(
+    db: Executor,
+    schema: SchemaDoc,
+    m: SourceMutation,
+    scope: SQL,
+    rowScope: FilterNode | undefined,
+  ): Promise<Row> {
+    const inScope = (row: ScopedRow) => {
+      if (row.__in_scope === false) {
+        throw new UdcError(
+          "forbidden",
+          `the row would fall outside the row scope of ${this.name}`,
+          {
+            collection: this.name,
+            reason: "out_of_scope",
+          },
+        );
+      }
+      return serialize(row);
+    };
+    const check = rowScope ? sql`, (${scope}) AS __in_scope` : sql``;
     if (m.op === "insert") {
       const data = withoutMeta(m.row ?? {});
       assertValidRow(schema, data, "insert");
-      const res = await this.db.execute<DbRow>(sql`
+      const res = await db.execute<ScopedRow>(sql`
         INSERT INTO ${this.table} (data) VALUES (${JSON.stringify(data)}::jsonb)
-        RETURNING id, version, data`);
-      return serialize(res.rows[0] as DbRow);
+        RETURNING id, version, data${check}`);
+      return inScope(res.rows[0] as ScopedRow);
     }
 
     if (m.id === undefined) throw new UdcError("validation_error", `${m.op} needs an id`);
@@ -173,25 +246,37 @@ export class PostgresJsonbSource implements Source {
     // The version check is part of the statement, so two concurrent edits cannot both win.
     const versionCheck =
       m.expected_version === undefined ? sql`` : sql` AND version = ${m.expected_version}`;
+    // The row scope is in the WHERE (a row outside it is not found) and, for an
+    // update, evaluated again on the new row in RETURNING.
     const res =
       m.op === "update"
-        ? await this.db.execute<DbRow>(sql`
+        ? await db.execute<ScopedRow>(sql`
             UPDATE ${this.table}
             SET data = data || ${JSON.stringify(patch)}::jsonb, version = version + 1, updated_at = now()
-            WHERE id = ${id}::uuid${versionCheck}
-            RETURNING id, version, data`)
-        : await this.db.execute<DbRow>(sql`
-            DELETE FROM ${this.table} WHERE id = ${id}::uuid${versionCheck}
+            WHERE id = ${id}::uuid${versionCheck} AND ${scope}
+            RETURNING id, version, data${check}`)
+        : await db.execute<ScopedRow>(sql`
+            DELETE FROM ${this.table} WHERE id = ${id}::uuid${versionCheck} AND ${scope}
             RETURNING id, version, data`);
     const row = res.rows[0];
-    if (row) return serialize(row);
+    if (row) return inScope(row);
 
-    const current = await this.db.execute<{ version: number }>(
-      sql`SELECT version FROM ${this.table} WHERE id = ${id}::uuid`,
+    // A row outside the scope does not exist for this request: no version conflict for it.
+    const current = await db.execute<{ version: number }>(
+      sql`SELECT version FROM ${this.table} WHERE id = ${id}::uuid AND ${scope}`,
     );
     const version = current.rows[0]?.version;
     if (version === undefined || m.expected_version === undefined) throw notFound(id);
     throw versionConflict(id, m.expected_version, version);
+  }
+
+  /** The row `id` in scope, locked `FOR UPDATE`; `null` when there is none. */
+  private async lockRow(tx: Executor, id: string, scope: SQL): Promise<Row | null> {
+    const res = await tx.execute<DbRow>(
+      sql`SELECT id, version, data FROM ${this.table} WHERE id = ${id}::uuid AND ${scope} FOR UPDATE`,
+    );
+    const row = res.rows[0];
+    return row ? serialize(row) : null;
   }
 
   /**
@@ -199,14 +284,15 @@ export class PostgresJsonbSource implements Source {
    * LAST, ties by id) and write `n * gap` back, bumping each version. The
    * order and scope fields passed the allowlist, so they may sit in the SQL.
    */
-  async reindex(req: SourceReindex): Promise<number> {
+  async reindex(req: SourceReindex, sctx?: SourceContext): Promise<number> {
     const schema = await this.describe();
     const { filter, orderField, orderDef } = reindexPlan(
       schema,
       req.scope,
       req.order_field ?? DEFAULT_ORDER_FIELD,
     );
-    const where = compileFilter(filter, schema);
+    // The request's scope (a kanban column) AND the host's row scope.
+    const where = compileFilter(andFilters(filter, sctx?.rowScope), schema);
     const order = fieldExpr(orderField, orderDef);
     const gap = req.gap ?? ORDER_GAP;
     const res = await this.db.execute(sql`
@@ -230,9 +316,12 @@ export class PostgresJsonbSource implements Source {
    * with a recursive CTE over `data->>parent_field`, and recount both
    * parents' children. Every row written gets its version bumped once.
    */
-  async reparent(req: SourceTreeReparent): Promise<TreeReparentResult> {
+  async reparent(req: SourceTreeReparent, sctx?: SourceContext): Promise<TreeReparentResult> {
     const schema = await this.describe();
     const plan = reparentPlan(schema, req.fields, req);
+    // Every statement below stays inside the row scope: the node, the new
+    // parent's chain, the subtree and the children counts.
+    const scope = sctx?.rowScope ? compileFilter(sctx.rowScope, schema) : sql`TRUE`;
     if (!isUuid(req.id)) throw notFound(req.id);
     if (req.parent !== null && !isUuid(req.parent)) throw notFound(req.parent);
     const parent = req.parent;
@@ -241,13 +330,14 @@ export class PostgresJsonbSource implements Source {
 
     return this.db.transaction(async (tx) => {
       const found = await tx.execute<{ version: number; parent: string | null }>(sql`
-        SELECT version, ${parentOf(pf)} AS parent FROM ${t} WHERE id = ${req.id}::uuid FOR UPDATE`);
+        SELECT version, ${parentOf(pf)} AS parent FROM ${t}
+        WHERE id = ${req.id}::uuid AND ${scope} FOR UPDATE`);
       const node = found.rows[0];
       if (!node) throw notFound(req.id);
       if (req.expected_version !== undefined && req.expected_version !== node.version) {
         throw versionConflict(req.id, req.expected_version, node.version);
       }
-      const chain = parent === null ? [] : await this.chainUp(tx, pf, parent);
+      const chain = parent === null ? [] : await this.chainUp(tx, pf, parent, scope);
       if (parent !== null && chain.length === 0) throw notFound(parent);
       if (chain.includes(req.id)) throw cycleError(req.id, parent as string);
 
@@ -263,22 +353,23 @@ export class PostgresJsonbSource implements Source {
         RETURNING id, version, data`);
       let updated = 1;
       if (moved) {
-        updated += await this.restructureSubtree(tx, plan, req.id, ancestors);
-        updated += await this.recountChildren(tx, plan, [node.parent, parent]);
+        updated += await this.restructureSubtree(tx, plan, req.id, ancestors, scope);
+        updated += await this.recountChildren(tx, plan, [node.parent, parent], scope);
       }
       return { row: serialize(res.rows[0] as DbRow), updated };
     });
   }
 
   /** The ids from `start` up to its root, nearest first; empty when `start` does not exist. */
-  private async chainUp(tx: Executor, pf: string, start: string): Promise<string[]> {
+  private async chainUp(tx: Executor, pf: string, start: string, scope: SQL): Promise<string[]> {
     // `CYCLE` stops the walk on data that already loops instead of running forever.
     const res = await tx.execute<{ id: string }>(sql`
       WITH RECURSIVE up(id, parent, n) AS (
-        SELECT id, ${parentOf(pf)}, 0 FROM ${this.table} WHERE id = ${start}::uuid
+        SELECT id, ${parentOf(pf)}, 0 FROM ${this.table} WHERE id = ${start}::uuid AND ${scope}
         UNION ALL
         SELECT t.id, ${parentOf(pf, "t")}, up.n + 1
         FROM ${this.table} t JOIN up ON t.id::text = up.parent
+        WHERE ${scope}
       ) CYCLE id SET looped USING path
       SELECT id::text FROM up WHERE NOT looped ORDER BY n`);
     return res.rows.map((r) => r.id);
@@ -290,6 +381,7 @@ export class PostgresJsonbSource implements Source {
     plan: ReparentPlan,
     root: string,
     ancestors: string[],
+    scope: SQL,
   ): Promise<number> {
     if (!plan.depthField && !plan.ancestorIdsField) return 0;
     const pf = plan.parentField;
@@ -302,15 +394,16 @@ export class PostgresJsonbSource implements Source {
     const res = await tx.execute(sql`
       WITH RECURSIVE sub(id, anc) AS (
         SELECT c.id, ${JSON.stringify([...ancestors, root])}::jsonb
-        FROM ${this.table} c WHERE ${parentOf(pf, "c")} = ${root}
+        FROM ${this.table} c WHERE ${parentOf(pf, "c")} = ${root} AND ${scope}
         UNION ALL
         SELECT c.id, sub.anc || to_jsonb(sub.id::text)
         FROM ${this.table} c JOIN sub ON ${parentOf(pf, "c")} = sub.id::text
+        WHERE ${scope}
       ) CYCLE id SET looped USING path
       UPDATE ${this.table} AS t
       SET data = t.data || ${sql.join(set, sql` || `)}, version = t.version + 1, updated_at = now()
       FROM sub s
-      WHERE t.id = s.id AND NOT s.looped`);
+      WHERE t.id = s.id AND NOT s.looped AND ${scope}`);
     return res.rowCount ?? 0;
   }
 
@@ -319,6 +412,7 @@ export class PostgresJsonbSource implements Source {
     tx: Executor,
     plan: ReparentPlan,
     parents: (string | null)[],
+    scope: SQL,
   ): Promise<number> {
     const field = plan.childrenCountField;
     const ids = parents.filter((p): p is string => p !== null && isUuid(p));
@@ -327,23 +421,30 @@ export class PostgresJsonbSource implements Source {
     const res = await tx.execute(sql`
       UPDATE ${this.table} AS t
       SET data = jsonb_set(t.data, ARRAY[${field}]::text[], to_jsonb((
-            SELECT count(*)::int FROM ${this.table} c WHERE ${parentOf(pf, "c")} = t.id::text))),
+            SELECT count(*)::int FROM ${this.table} c
+            WHERE ${parentOf(pf, "c")} = t.id::text AND ${scope}))),
           version = t.version + 1,
           updated_at = now()
-      WHERE t.id = ANY(${`{${ids.join(",")}}`}::uuid[])`);
+      WHERE t.id = ANY(${`{${ids.join(",")}}`}::uuid[]) AND ${scope}`);
     return res.rowCount ?? 0;
   }
 
-  addField(req: SourceAddField): Promise<SchemaDoc> {
+  addField(req: SourceAddField, _sctx?: SourceContext): Promise<SchemaDoc> {
     return this.editSchema({ op: "add", ...req });
   }
 
-  updateField(req: SourceUpdateField): Promise<SchemaDoc> {
+  updateField(req: SourceUpdateField, _sctx?: SourceContext): Promise<SchemaDoc> {
     return this.editSchema({ op: "update", ...req });
   }
 
-  softDeleteField(field: string): Promise<SchemaDoc> {
+  softDeleteField(field: string, _sctx?: SourceContext): Promise<SchemaDoc> {
     return this.editSchema({ op: "soft_delete", field });
+  }
+
+  /** The row scope of `sctx` as SQL over the active schema; `TRUE` without one. */
+  private async scopeSql(sctx: SourceContext | undefined): Promise<SQL> {
+    if (!sctx?.rowScope) return sql`TRUE`;
+    return compileFilter(sctx.rowScope, await this.describe());
   }
 
   private editSchema(edit: SchemaEdit): Promise<SchemaDoc> {
