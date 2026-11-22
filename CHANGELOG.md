@@ -57,11 +57,50 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 - `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`,
   `decodeSearchCursor` for a source of your own that answers `search`.
 - `mutate_many` by `filter` does not take search text (documented).
+- The change feed: `createChangeFeed({ bus?, heartbeatMs?, retryMs?,
+  coalesce?, maxIds?, log? })` (`ChangeFeed`) given to `createDispatcher` as
+  the new option `changes`. With it, every collection reports
+  `capabilities.changes: true` (`subscribe` stays `false`), and `udcPlugin`
+  serves `GET /udc/changes?collections=a,b` as Server-Sent Events (it then
+  needs `registry`): `context` once at connect (a refusal is HTTP 401 / 403,
+  not a stream), each collection under the `access` rule of `list` (404
+  otherwise) and its row scope, a `retry:` hint, a `ready` event, `change`
+  events `{ collection, op, ids? }` with no row data, a heartbeat comment,
+  the listener removed when the client leaves, every stream ended on
+  `app.close()`. Works under the plugin's `prefix` and keeps headers a
+  host's hooks set (CORS). No replay. `registerChangesRoute`,
+  `ChangesRouteOptions`, `MAX_CHANGE_COLLECTIONS`.
+- jsudc's own writes notify after they commit, once per request, never for
+  a failed one: `mutate` (the row's id; an update also tested on the row as
+  it was), `mutate_many` (the changed ids), `reindex` and `tree.reparent`
+  (without ids). Without `changes` nothing runs and nothing changes.
+- `ChangeFeed.notify(collection, { op?, ids?, ctx?, rows? })` for a host's
+  own writes. The scope rule: a stream is told when its collection has no
+  row scope for it, or its scope (core's `evaluateFilter`) holds for at
+  least one changed row's values, and then only those rows' ids; the values
+  come from the written rows, the `eq` conditions of `rowScope(ctx,
+  collection)`, or the host's `rows`. A notify with neither `ctx` nor `rows`
+  on a collection that has a row scope throws. `NotifyOptions`, `eventFor`,
+  `scopeValues`, `ChangeSubscriber`, `ChangeFeed.listenerCount`.
+- Buses between server processes: `ChangeBus` (`publish` / `subscribe`, a
+  `ChangeNotice` with server-side `ChangeMatch` values), the default
+  in-process `MemoryChangeBus`, and `createPostgresChangeBus({
+  connectionString, pool?, channel?, reconnectDelayMs?, maxReconnectDelayMs?,
+  log? })` (`PostgresChangeBus`): a dedicated `LISTEN` connection that
+  reconnects with backoff, local delivery without the echo, a payload over
+  NOTIFY's limit sent without ids (`encodeNotice`, `NOTIFY_PAYLOAD_LIMIT`,
+  `DEFAULT_CHANGE_CHANNEL`).
+- Burst control per stream and collection (`coalesce`: past 20 events in
+  250 ms, one event without ids), and `maxIds` (500): a longer id list is
+  sent without ids.
+- `SourceContext.changedRows` (optional): on a `mutate_many` with a feed, a
+  source hands over the rows it wrote; both Postgres sources do. `ScopedCollection`
+  and `openCollection` take the feed as a new optional last argument.
 
 ### Changed
 
 - `@jsudc/core` devDependency at core's `release-0.5.0` head (the peer stays
-  `^0.4.0` until the release tickets), now `2099b0e` (`ListRequest.search`).
+  `^0.4.0` until the release tickets), now `5d01d96` (the change feed: `capabilities.changes`, `ChangeEvent`).
 
 ## [0.4.0] - 2026-11-22
 

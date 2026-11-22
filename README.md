@@ -1006,33 +1006,214 @@ const client = new UdcClient({ httpUrl: "" });
 const { archived } = await client.call(archiveThread, { thread: "t42" }); // typed
 ```
 
+## Change feed
+
+A host tells jsudc when rows changed, and every connected client that may see
+those rows is told over one long-lived stream, so the UI refreshes without
+polling. A client is told only about rows inside its own scope, and never
+receives row data: an event is `{ collection, op, ids? }` (`ChangeEvent` of
+`@jsudc/core`), and the client refetches under its own scope, so a hidden
+scope field cannot leak through the feed.
+
+Configure it once and give it to the dispatcher:
+
+```ts
+import { buildApp, createChangeFeed, createDispatcher } from "@jsudc/server";
+
+const changes = createChangeFeed(); // one process; see "Several processes" below
+const dispatcher = createDispatcher<Ctx>(registry, { log, rowScope, changes });
+const app = await buildApp({ dispatcher, registry, context: (req) => sessionOf(req) });
+```
+
+With it, every collection reports `capabilities.changes: true` (`describe`,
+`collections`; `capabilities.subscribe` stays `false`, it promises udc-py's
+WebSocket actions), and the plugin serves `GET /udc/changes?collections=a,b`
+(under the plugin's `prefix`, next to your own routes) as Server-Sent Events.
+Without `changes` nothing differs from before: no route, no capability, no
+cost.
+
+The stream runs `context` once when it opens: a refusal is an HTTP 401
+(unauthenticated) or 403 with the error payload, not a stream. Every
+collection must be one the request may `list` (the `access` rule, asked with
+action `list`), else 404; its row scope is fixed for the life of the stream.
+Then it sends a `retry:` hint (`retryMs`, default 3 s), a `ready` event, a
+`change` event per change the request may see, and a heartbeat comment every
+`heartbeatMs` (default 15 s). The listener is removed when the client goes
+away, and `app.close()` ends every open stream. There is **no replay**: a
+change made while a client was disconnected is not sent later; the client
+refetches when it reconnects (`UdcClient.changes` reports `reconnected` for
+exactly that).
+
+### What jsudc notifies by itself
+
+After its own writes commit (when the source has answered), once per request,
+never for a request that failed:
+
+| Action          | Event                                                                                                                                               |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had) |
+| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                     |
+| `reindex`       | `update` without ids, tested on the request's `scope` and the row scope's pinned values                                                             |
+| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                           |
+
+Both Postgres sources hand the rows a `mutate_many` wrote to the feed
+(`SourceContext.changedRows`); a source of your own with a native
+`mutateMany` may do the same. One that does not still notifies, with the ids
+asked for and the row scope's pinned values.
+
+### `notify`: changes jsudc did not make
+
+After a write of your own, call `changes.notify(collection, { op?, ids?, ctx?, rows? })`:
+
+- **`ctx`**: the request context the rows belong to. The `eq` conditions of
+  `rowScope(ctx, collection)` are what the scope rule tests, so only streams
+  in that scope (and unscoped ones) are told.
+- **`rows`**: the changed rows' values (any fields a scope tests; a
+  `__meta.id` names the row). Each scope is told only the ids of its own rows.
+  Preferred over `ctx` when both are given.
+- **`op`** defaults to `update`; no `ids` means "this collection changed".
+
+On a collection that has a row scope, a `notify` with neither `ctx` nor
+`rows` **throws**: nothing is ever broadcast across scopes. Whether a
+collection has a scope is asked of your `rowScope` with no context: a filter,
+or a throw (it reads a context that is not there), means it has one.
+
+Worked example: a background job syncs a user's mailbox and inserts the new
+messages; that user's open tabs refresh, nobody else's.
+
+```ts
+import { createChangeFeed, createDispatcher } from "@jsudc/server";
+
+const changes = createChangeFeed();
+const dispatcher = createDispatcher<Ctx>(registry, {
+  log,
+  rowScope: (ctx, collection) =>
+    collection === "message" ? { field: "owner", op: "eq", value: ctx.user } : undefined,
+  changes,
+});
+
+async function syncMailbox(user: string): Promise<void> {
+  const inserted = await imap.fetchNew(user); // writes rows owned by `user`, outside jsudc
+  if (inserted.length === 0) return;
+  await changes.notify<Ctx>("message", {
+    op: "insert",
+    ids: inserted.map((m) => m.id),
+    ctx: { user }, // → { owner: user }: only this user's streams hear it
+  });
+}
+```
+
+### The scope rule, in plain words
+
+A stream is told about a change in a collection when it asked for that
+collection and either it has no row scope there, or its scope holds for at
+least one of the changed rows; it then receives only the ids of the rows its
+scope holds for. To test that, a change carries, on the server only, the
+values of the changed rows a scope can test (strings up to 256 characters,
+numbers, booleans, null, short arrays of those; row contents beyond that are
+never kept). A change whose rows are unknown reaches unscoped streams only.
+
+Burst control: past `coalesce.maxEvents` events (default 20) for one
+collection on one stream within `coalesce.windowMs` (default 250 ms), the
+rest are sent as one event without ids at the end of the window
+(`coalesce: false` turns it off). An event naming more than `maxIds` rows
+(default 500) is sent without ids.
+
+### Several processes: the Postgres bus, or your own
+
+The default bus is in-process: right for one server process. With several
+behind a load balancer, a change made through one must reach the streams of
+the others; give every process the same bus.
+
+```ts
+import { createChangeFeed, createPostgresChangeBus } from "@jsudc/server";
+
+const changes = createChangeFeed({
+  bus: createPostgresChangeBus({
+    connectionString: process.env.DATABASE_URL!,
+    pool: dbHandle.pool, // optional: NOTIFY through your pool
+    channel: "jsudc_changes", // the default; every process must agree
+  }),
+});
+```
+
+`PostgresChangeBus` keeps one dedicated connection per process that
+`LISTEN`s, and reopens it with backoff when it drops (`reconnectDelayMs`,
+`maxReconnectDelayMs`); notices sent while it is down are lost to that
+process (its clients refetch on reconnect). A change is delivered to the
+streams of its own process at once and sent to the others with `NOTIFY`; a
+payload over NOTIFY's size limit (8000 bytes) goes out without ids, meaning
+"this collection changed", split over several notifications when the values
+to test are large. `changes.close()` closes the bus.
+
+Anything else (Redis pub/sub, NATS) is a `ChangeBus` of your own:
+
+```ts
+import type { ChangeBus, ChangeNotice } from "@jsudc/server";
+
+function redisBus(pub: Redis, sub: Redis, channel = "jsudc_changes"): ChangeBus {
+  const listeners = new Set<(n: ChangeNotice) => void>();
+  void sub.subscribe(channel);
+  sub.on("message", (_ch, text) => {
+    for (const l of listeners) l(JSON.parse(text) as ChangeNotice);
+  });
+  return {
+    publish: async (notice) => void (await pub.publish(channel, JSON.stringify(notice))),
+    subscribe: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
+    close: async () => void (await sub.quit()),
+  };
+}
+```
+
+`publish` must reach every process, this one included (or deliver locally and
+skip its own echo, as the Postgres bus does); a `ChangeNotice` carries the
+values the scope rule tests, so keep the channel server-side.
+
+### What a proxy must allow
+
+The stream is one response that never ends. In front of it:
+
+- **No buffering.** nginx: `proxy_buffering off;` (the route also sends
+  `X-Accel-Buffering: no`), and no gzip on `text/event-stream`.
+- **Long timeouts.** The heartbeat writes every 15 s; a read timeout above
+  that keeps the connection open (nginx `proxy_read_timeout 1h;`, an AWS ALB
+  idle timeout above 15 s). HTTP/1.1 to the upstream
+  (`proxy_http_version 1.1; proxy_set_header Connection "";`).
+- Browsers allow about six HTTP/1.1 connections per origin: open one stream
+  for all the collections a page shows (`collections=a,b,c`), or serve over
+  HTTP/2.
+
 ## API
 
-| Export                                                                                                                             | What                                                                                     |
-| ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                        | the Fastify plugin, and a Fastify instance with it registered                            |
-| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                 | every action wired to a registry; `Dispatcher` to register actions of your own           |
-| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                   | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap  |
-| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                      | read a collection directory; the served collections                                      |
-| `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for                                                        |
-| `PostgresJsonbSource`, `PostgresTableSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                | the six sources, usable directly                                                         |
-| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, … | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
-| `ArraySource`, `Source` and its request types                                                                                      | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
-| `OnMutateHook`, `OnMutateResult`, `RowChange`                                                                                      | the `onMutate` option of both Postgres sources (see above)                               |
-| `connect`, `Db`, `DbHandle`, `Executor`                                                                                            | a drizzle database over a `pg` pool                                                      |
-| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                           | the library's SQL                                                                        |
-| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                                | the tables, for drizzle and for plain SQL                                                |
-| `seedCollection`                                                                                                                   | schema revision 1 and the rows of a Postgres collection                                  |
-| `activeSchema`, `writeSchemaRevision`                                                                                              | the schema store under the schema edits                                                  |
-| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                               | what `describe` answers, for a custom action                                             |
-| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                          | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
-| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                  | the file preview route on its own                                                        |
-| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                           | the request context and the row scope (see above)                                        |
-| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`      | the generic row-scope layer, for a route of your own that reaches rows                   |
-| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`, `PostgresTableSearch`                            | the search box answered by the source (see above)                                        |
-| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                         | the same pieces, for a source of your own that answers `search`                          |
-| `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                     |
-| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                               |
+| Export                                                                                                                                       | What                                                                                     |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                                  | the Fastify plugin, and a Fastify instance with it registered                            |
+| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                           | every action wired to a registry; `Dispatcher` to register actions of your own           |
+| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                             | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap  |
+| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                                | read a collection directory; the served collections                                      |
+| `makeSource`, `SourceDeps`                                                                                                                   | the source `source.yaml` asks for                                                        |
+| `PostgresJsonbSource`, `PostgresTableSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                          | the six sources, usable directly                                                         |
+| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, …           | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
+| `ArraySource`, `Source` and its request types                                                                                                | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
+| `OnMutateHook`, `OnMutateResult`, `RowChange`                                                                                                | the `onMutate` option of both Postgres sources (see above)                               |
+| `connect`, `Db`, `DbHandle`, `Executor`                                                                                                      | a drizzle database over a `pg` pool                                                      |
+| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                                     | the library's SQL                                                                        |
+| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                                          | the tables, for drizzle and for plain SQL                                                |
+| `seedCollection`                                                                                                                             | schema revision 1 and the rows of a Postgres collection                                  |
+| `activeSchema`, `writeSchemaRevision`                                                                                                        | the schema store under the schema edits                                                  |
+| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                                         | what `describe` answers, for a custom action                                             |
+| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                                    | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
+| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                            | the file preview route on its own                                                        |
+| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                                     | the request context and the row scope (see above)                                        |
+| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`                | the generic row-scope layer, for a route of your own that reaches rows                   |
+| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`, `PostgresTableSearch`                                      | the search box answered by the source (see above)                                        |
+| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                                   | the same pieces, for a source of your own that answers `search`                          |
+| `createChangeFeed`, `ChangeFeed`, `ChangeFeedOptions`, `NotifyOptions`, `ChangeCoalesceOptions`                                              | the change feed and `notify` (see [Change feed](#change-feed))                           |
+| `ChangeBus`, `ChangeNotice`, `ChangeMatch`, `ChangeListener`, `MemoryChangeBus`                                                              | the bus between server processes, and the in-process one                                 |
+| `createPostgresChangeBus`, `PostgresChangeBus`, `PostgresChangeBusOptions`, `encodeNotice`, `DEFAULT_CHANGE_CHANNEL`, `NOTIFY_PAYLOAD_LIMIT` | the `LISTEN` / `NOTIFY` bus                                                              |
+| `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`                       | the stream route on its own, and the scope rule's pieces                                 |
+| `BlobRouteOptions`                                                                                                                           | `registerBlobRoute(app, registry, {context, scope})`                                     |
+| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                                     | the pieces the http_api and filesystem sources are made of                               |
 
 ## Develop
 
