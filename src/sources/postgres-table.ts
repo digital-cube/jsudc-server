@@ -15,6 +15,7 @@ import { idArray, missing, tooManyRows } from "./bulk.js";
 import { type CursorValue, decodeCursor, encodeCursor, isIdOfType } from "./cursor.js";
 import { assertQueryFields, notFound, versionConflict, withoutMeta } from "./fields.js";
 import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
+import { assertSearchable, encodeSearchCursor, searchPage, searchText } from "./search.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_PAGE_SIZE,
@@ -102,6 +103,23 @@ export interface TableFieldSpec {
   array?: SqlArrayForm | undefined;
 }
 
+/**
+ * How a `postgres_table` source matches the search box in SQL, written by
+ * the host in code. `q` is the search text as a bound parameter (never
+ * spliced into the statement); `text` is the same text, for a host that
+ * builds its own parameter from it (a prefix pattern, for instance).
+ */
+export interface PostgresTableSearch {
+  /** A condition true for a row that matches: `` sql`m.tsv @@ websearch_to_tsquery('simple', ${q})` ``. */
+  match(q: SQL, text: string): SQL;
+  /**
+   * The relevance of a row, higher first: `` sql`ts_rank(m.tsv, websearch_to_tsquery('simple', ${q}))` ``.
+   * With it, a search without a `sort` comes by rank (ties by id), paged by
+   * offset. Without it, a search is ordered like any list.
+   */
+  rank?(q: SQL, text: string): SQL;
+}
+
 export interface PostgresTableSourceOptions {
   db: Db;
   /** The collection's `schema.json`; there are no revisions. */
@@ -144,6 +162,14 @@ export interface PostgresTableSourceOptions {
   onMutate?(ctx: unknown, change: RowChange, tx: Executor): OnMutateResult;
   /** A condition (SQL, from code) ANDed into every statement. */
   where?: SQL | string | undefined;
+  /**
+   * The search box answered by this source (`capabilities.search: "source"`):
+   * the text of a `list` with `search` is matched by `search.match`, ANDed
+   * with the base `where`, the row scope and the client's filter, and ranked
+   * by `search.rank` when there is no `sort`. Without it, the client composes
+   * `contains` as before.
+   */
+  search?: PostgresTableSearch | undefined;
   /** `false`: no `count(*)` next to the page; `total` is `null`. Default `true`. */
   totalCount?: boolean | undefined;
   /** `true`: a NULL column is served as `null`; by default it is left out of the row. */
@@ -236,6 +262,7 @@ export class PostgresTableSource implements Source {
   /** The schema an insert or patch is validated against: the read-only fields are not in it. */
   private readonly writeSchema: SchemaDoc;
   private readonly onMutate: PostgresTableSourceOptions["onMutate"];
+  private readonly search: PostgresTableSearch | undefined;
 
   constructor(opts: PostgresTableSourceOptions) {
     if ((opts.table === undefined) === (opts.from === undefined)) {
@@ -293,6 +320,7 @@ export class PostgresTableSource implements Source {
     this.notFilterable = notFilterable;
     this.computedFields = computed;
     this.onMutate = opts.onMutate;
+    this.search = opts.search;
     this.writes = opts.readOnly ? null : writePlan(opts, schema, columnOf, readOnly, arrayForms);
     this.readOnlyFields = readOnly;
     this.writeSchema = withoutFields(schema, new Set(readOnly));
@@ -315,6 +343,7 @@ export class PostgresTableSource implements Source {
       tree_reparent: false,
       source_yaml: false,
       paging: ["cursor", "offset"],
+      ...(this.search ? { search: "source" as const } : {}),
       supported_filter_ops: ALL_FILTER_OPS,
     };
   }
@@ -328,12 +357,21 @@ export class PostgresTableSource implements Source {
     assertQueryFields(this.filterSchema, req.filter, undefined);
     assertQueryFields(this.sortSchema, undefined, req.sort);
     const r = this.resolver;
+    const text = searchText(req.search);
+    if (text !== undefined && !this.search) {
+      assertSearchable(this.capabilities, this.label, text);
+    }
+    const q = sql`${text}`;
+    const match = text !== undefined && this.search ? this.search.match(q, text) : sql`TRUE`;
     // The client filter against what a client may filter by; the host's row scope against the whole schema.
     const where = sql`${this.baseWhere} AND ${this.scopeSql(sctx)} AND ${compileFilter(
       req.filter,
       this.filterSchema,
       r,
-    )}`;
+    )} AND (${match})`;
+    if (text !== undefined && this.search?.rank && !req.sort?.length) {
+      return this.listByRank(where, this.search.rank(q, text), req);
+    }
     const terms = compileSort(req.sort, this.sortSchema, r);
     const limit = req.page?.limit ?? this.pageSizeDefault;
     const cursor = req.page?.cursor;
@@ -369,6 +407,29 @@ export class PostgresTableSource implements Source {
         : null;
     const total = count ? (count.rows[0]?.total ?? 0) : null;
     return { rows: page.map((row) => this.serialize(row)), next_cursor, total };
+  }
+
+  /** One page of a search in relevance order (ties by id), by offset or the cursor of the previous page. */
+  private async listByRank(where: SQL, rank: SQL, req: SourceListRequest): Promise<ListResponse> {
+    const { limit, offset } = searchPage(req, this.pageSizeDefault);
+    const rowsQuery = this.db.execute<TableRow>(sql`
+      SELECT ${this.columns()}
+      FROM ${this.from}
+      WHERE ${where}
+      ORDER BY (${rank}) DESC NULLS LAST, ${this.resolver.id} ASC
+      LIMIT ${limit + 1} OFFSET ${offset}`);
+    const countQuery = this.totalCount
+      ? this.db.execute<{ total: number }>(
+          sql`SELECT count(*)::int AS total FROM ${this.from} WHERE ${where}`,
+        )
+      : null;
+    const [rows, count] = await Promise.all([rowsQuery, countQuery]);
+    const page = rows.rows.slice(0, limit);
+    return {
+      rows: page.map((row) => this.serialize(row)),
+      next_cursor: rows.rows.length > limit ? encodeSearchCursor(offset + limit) : null,
+      total: count ? (count.rows[0]?.total ?? 0) : null,
+    };
   }
 
   async read(id: string, sctx?: SourceContext): Promise<Row> {

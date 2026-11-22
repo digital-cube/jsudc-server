@@ -23,6 +23,14 @@ export interface SourceListRequest {
   filter?: FilterNode | undefined;
   sort?: SortKey[] | undefined;
   page?: PageRequest | undefined;
+  /**
+   * The search box's text (`ListRequest.search`), for a source whose
+   * `capabilities.search` is `"source"`: the rows must match it as well as
+   * the filter (and the row scope). With no `sort` the source may order them
+   * by relevance. The generic layer refuses it for any other source, and
+   * passes it trimmed, never empty.
+   */
+  search?: string | undefined;
 }
 
 export interface SourceMutation {

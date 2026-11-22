@@ -803,6 +803,141 @@ await client.mutateMany({ collection: "message", op: "delete", ids: [id1, idOfTe
 // { updated: 1, failed: [{ id: idOfTenantB, code: "not_found", message: "no row with id …" }] }
 ```
 
+## Search answered by the source
+
+By default the search box is answered in the browser: `@jsudc/react` turns
+its text into `contains` conditions over `view.search.fields`. A collection
+whose rows have a real full-text index (a `tsvector` in Postgres, OpenSearch
+beside the database) can answer the text itself instead: it reports
+`capabilities.search: "source"`, the client sends the text as
+`ListRequest.search` and composes nothing, and the source matches it — and,
+when the request has no `sort`, may return the rows by relevance.
+
+**Never wider than the scope.** The dispatcher passes `search` to the source
+in `SourceListRequest` (trimmed; a blank text is no search). Whatever the
+source matches is ANDed with the caller's row scope and the client's filter,
+like any other condition: two tenants searching the same word each get only
+their own rows.
+
+**Refused, not ignored.** A collection whose source does not report the
+capability answers a `search` with `unsupported_op` (`details.field:
+"search"`) — it never ignores the text and lists every row. A source of your
+own that sets `capabilities.search: "source"` reads `req.search` in `list`.
+
+### On `postgres_table`: a `tsvector`
+
+The `search` option of `PostgresTableSource` says, in SQL written in code,
+how a row matches and how relevant it is. `match(q, text)` is a condition and
+`rank(q, text)` (optional) a number, higher first; `q` is the text as a bound
+parameter — it is never spliced into the statement — and `text` the same
+text, for a host that builds a parameter of its own from it. With the option
+the source reports `search: "source"`. A search with no `sort` comes by rank,
+ties by id, paged by offset (the `next_cursor` it hands out carries the next
+offset, so a client that walks by cursor walks a search too). With a `sort`,
+or without `rank`, the match is one more condition and the list is ordered
+and paged as usual.
+
+```sql
+-- The host's migration: a generated tsvector and its index.
+ALTER TABLE inbox.message ADD COLUMN tsv tsvector GENERATED ALWAYS AS (
+  setweight(to_tsvector('simple', coalesce(subject, '')), 'A') ||
+  setweight(to_tsvector('simple', coalesce(body_text, '')), 'B')) STORED;
+CREATE INDEX message_tsv ON inbox.message USING gin (tsv);
+```
+
+```ts
+import { loadRegistry, makeSource, PostgresTableSource } from "@jsudc/server";
+import { sql } from "drizzle-orm";
+
+const registry = loadRegistry("./collections", (asset, reg) =>
+  asset.name === "message"
+    ? new PostgresTableSource({
+        db,
+        schema: asset.schema,
+        table: "inbox.message",
+        versionColumn: "row_version",
+        search: {
+          // websearch syntax: quoted phrases, `or`, a minus to exclude.
+          match: (q) => sql`tsv @@ websearch_to_tsquery('simple', ${q})`,
+          rank: (q) => sql`ts_rank(tsv, websearch_to_tsquery('simple', ${q}))`,
+        },
+      })
+    : makeSource(asset, { db, registry: reg, env: process.env }),
+);
+```
+
+```ts
+// A tenant's client: the best matches first, inside its own rows only.
+await client.list({ collection: "message", search: "invoice -draft", page: { limit: 50 } });
+// Roughly: SELECT … WHERE tenant_id = $1 AND (tsv @@ websearch_to_tsquery('simple', $2))
+// ORDER BY (ts_rank(tsv, websearch_to_tsquery('simple', $3))) DESC NULLS LAST, id ASC LIMIT 51 OFFSET 0
+```
+
+### An external index: `withSearchIndex`
+
+When the index lives outside the database (OpenSearch, Elasticsearch, a
+vector store), the host answers the text and jsudc does the rest.
+`withSearchIndex(source, { search })` wraps any source: the wrapper reports
+`search: "source"`, and a `list` with a `search` calls the host's
+`search(query)` for **one page of row ids in relevance order** (and a `total`
+when the index has one). jsudc then loads exactly those rows from the source
+— `id in ids` ANDed with the client's filter, under the row scope — and
+returns them in the index's order. An id the scope or the filter hides (or
+one deleted since it was indexed) is dropped, never fetched around: the page
+comes back shorter. `total` is the index's, `null` without one. A list
+without `search`, and every other method, is the wrapped source's own.
+
+The `query` the host receives (`SearchIndexQuery`): `text`, `page: { limit,
+offset }`, `ctx` (what the plugin's `context` hook answered), `collection`,
+`rowScope`, and the client's `filter` and `sort` when present. Pass the
+tenant to the index as well, so a page is not mostly rows jsudc will drop;
+jsudc applies the scope regardless.
+
+```ts
+import { Client } from "@opensearch-project/opensearch";
+import { loadRegistry, makeSource, withSearchIndex } from "@jsudc/server";
+
+const os = new Client({ node: process.env.OPENSEARCH_URL });
+
+const registry = loadRegistry("./collections", (asset, reg) => {
+  const source = makeSource(asset, { db, registry: reg, env: process.env });
+  if (asset.name !== "message" || !source) return source;
+  return withSearchIndex(source, {
+    async search({ text, page, ctx }) {
+      const res = await os.search({
+        index: "messages",
+        from: page.offset,
+        size: page.limit,
+        _source: false,
+        body: {
+          query: {
+            bool: {
+              must: { simple_query_string: { query: text, fields: ["subject^3", "body"] } },
+              filter: { term: { tenant_id: (ctx as { tenantId: string }).tenantId } },
+            },
+          },
+        },
+      });
+      return {
+        ids: res.body.hits.hits.map((h) => h._id),
+        total: res.body.hits.total.value,
+      };
+    },
+  });
+});
+```
+
+Loading by `id in ids` needs a filter on `id` to mean the row id, which holds
+for every built-in source unless its schema has a field named `id` of its own.
+The host's `sort` is advisory: the wrapper keeps the order of `ids`, so a host
+that wants a chosen sort to win orders its hits by it.
+
+**Not covered.** `mutate_many` by `filter` takes no search text: "all that
+match" a source search cannot be named in a bulk request yet, and
+`@jsudc/react` does not offer it while a source search is active. Highlights,
+facets and suggestions are not part of the protocol; no OpenSearch client
+ships with jsudc.
+
 ## Host actions
 
 A host serves actions of its own next to the built-in ones. Define each once
@@ -894,6 +1029,8 @@ const { archived } = await client.call(archiveThread, { thread: "t42" }); // typ
 | `registerBlobRoute`, `BLOB_ROUTE`                                                                                                  | the file preview route on its own                                                        |
 | `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                           | the request context and the row scope (see above)                                        |
 | `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`      | the generic row-scope layer, for a route of your own that reaches rows                   |
+| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`, `PostgresTableSearch`                            | the search box answered by the source (see above)                                        |
+| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                         | the same pieces, for a source of your own that answers `search`                          |
 | `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                     |
 | `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                               |
 

@@ -37,11 +37,31 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
   the payload is validated with its request schema, and the OpenAPI document
   shows its response schema (`Dispatcher.responseOf(action)`).
   `register(name, schema, handler)` is unchanged.
+- Search answered by the source. The dispatcher passes `ListRequest.search`
+  (`@jsudc/core`) to the source as `SourceListRequest.search` (optional,
+  trimmed; a blank text is no search), ANDed with the row scope and the
+  client's filter. A collection whose source does not report
+  `capabilities.search: "source"` refuses a `search` with `unsupported_op`
+  (`details.field: "search"`) instead of ignoring it.
+- `PostgresTableSource` option `search` (`PostgresTableSearch`): `match(q,
+  text)`, a condition in SQL with the text as a bound parameter, and
+  optional `rank(q, text)`. With it the source reports `search: "source"`;
+  a search without `sort` comes by rank (ties by id), paged by offset, with a
+  `next_cursor` that carries the next offset.
+- `withSearchIndex(source, { search })`: the search answered by an external
+  index (OpenSearch and the like). The host returns one page of ids in
+  relevance order (and a `total`) for `{ text, page, ctx, collection,
+  rowScope, filter?, sort? }` (`SearchIndexQuery`, `SearchIndexResult`,
+  `SearchIndexOptions`); jsudc loads those rows under the scope and the
+  filter, in that order, dropping the ones the scope hides.
+- `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`,
+  `decodeSearchCursor` for a source of your own that answers `search`.
+- `mutate_many` by `filter` does not take search text (documented).
 
 ### Changed
 
 - `@jsudc/core` devDependency at core's `release-0.5.0` head (the peer stays
-  `^0.4.0` until the release tickets).
+  `^0.4.0` until the release tickets), now `2099b0e` (`ListRequest.search`).
 
 ## [0.4.0] - 2026-11-22
 

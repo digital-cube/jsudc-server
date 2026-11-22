@@ -78,10 +78,22 @@ export { PostgresJsonbSource, type PostgresJsonbSourceOptions } from "./sources/
 export {
   type ColumnResolverOptions,
   columnResolver,
+  type PostgresTableSearch,
   PostgresTableSource,
   type PostgresTableSourceOptions,
   type TableFieldSpec,
 } from "./sources/postgres-table.js";
+export {
+  assertSearchable,
+  decodeSearchCursor,
+  encodeSearchCursor,
+  type SearchIndexOptions,
+  type SearchIndexQuery,
+  type SearchIndexResult,
+  searchPage,
+  searchText,
+  withSearchIndex,
+} from "./sources/search.js";
 export type {
   MutateManyResult,
   Source,

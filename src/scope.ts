@@ -20,6 +20,7 @@ import { buildDescribe } from "./describe.js";
 import type { Collection, CollectionRegistry } from "./registry.js";
 import { notFoundFailure, tooManyRows } from "./sources/bulk.js";
 import { assertValidRow, filterFields, notFound, withoutMeta } from "./sources/fields.js";
+import { assertSearchable, searchText } from "./sources/search.js";
 import type {
   MutateManyResult,
   Source,
@@ -274,7 +275,16 @@ export class ScopedCollection {
     return describeWithout(filterable, this.hidden);
   }
 
-  async list(req: SourceListRequest): Promise<ListResponse> {
+  /**
+   * A `list` under the row scope. A `search` reaches only a source that
+   * answers it (`capabilities.search: "source"`, else `unsupported_op`),
+   * trimmed, and is ANDed with the scope and the filter like any condition.
+   */
+  async list(listReq: SourceListRequest): Promise<ListResponse> {
+    const { search, ...rest } = listReq;
+    assertSearchable(this.source.capabilities, this.collection.name, search);
+    const text = searchText(search);
+    const req: SourceListRequest = text === undefined ? rest : { ...rest, search: text };
     if (!this.rowScope) return this.source.list(req, this.sctx);
     this.refuseHidden(req.filter, req.sort);
     const filter = this.native ? req.filter : andFilters(this.rowScope, req.filter);

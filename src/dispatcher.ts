@@ -283,12 +283,13 @@ export function createDispatcher<Ctx = unknown>(
     .register(
       "list",
       ACTIONS.list.request,
-      ({ collection, filter, sort, page }, ctx): Promise<ListResponse> => {
+      ({ collection, filter, sort, page, search }, ctx): Promise<ListResponse> => {
         const s = open("list", collection, ctx);
         return s.list({
           filter,
           sort,
           page: { ...page, limit: page?.limit ?? s.collection.view.page_size_default },
+          ...(search === undefined ? {} : { search }),
         });
       },
     )
