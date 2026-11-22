@@ -7,6 +7,37 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Request context: `udcPlugin` option `context(request)` (sync or async). Its
+  value travels through `Dispatcher.dispatch(msg, ctx?)` (new optional
+  argument) to every handler — `register` handlers get `(payload, ctx)`, a
+  one-argument handler still works — and to every `Source` method as a
+  trailing optional `SourceContext` (`{ctx, collection, rowScope?}`); every
+  shipped source accepts it. A `UdcError` thrown by `context` refuses the
+  request in-protocol (HTTP 200, `.err`); the file preview route answers 401
+  (unauthenticated) / 403. Anything else is `internal`, logged, not leaked.
+- Host-imposed row scope: `createDispatcher` options `rowScope(ctx,
+  collection)`, `access(ctx, {action, collection})` and `showScopeFields`
+  (`DispatcherOptions`, `RowScopeOptions`, `AccessRequest`). One generic layer
+  (`ScopedCollection`, `openCollection`) holds every source to the scope on
+  `list` (total and both pagings in scope), `read` and `mutate` (outside →
+  `not_found`, identical to a missing id), insert / patch (top-level `eq`
+  values pinned; a row still outside → `forbidden`, `reason: "out_of_scope"`),
+  `reindex` (ANDed with the request's `scope`) and `tree.reparent`;
+  `postgres_jsonb` also enforces it inside its SQL (`Source.enforcesRowScope`).
+  The scope's fields are hidden from `describe` and the rows unless the
+  collection is in `showScopeFields`. `schema.*` and `source.read` on a scoped
+  collection are `forbidden` unless `access` answers `true`; `access: false`
+  hides a collection (`collections`, `not_found`). `GET /udc/files/blob` runs
+  `context`, `access` and the scope (404 outside).
+- `registerBlobRoute(app, registry, opts?)`: optional `BlobRouteOptions`
+  (`context`, `scope`). Helpers `andFilters`, `rowScopePins`, `withoutFields`,
+  `describeWithout`, `TENANT_WIDE_ACTIONS`.
+- Dev: `@jsudc/core` devDependency pinned to the `release-0.4.0` commit of
+  core (for `unauthenticatedError` / `isUnauthenticated`) until core 0.4.0 is
+  on npm.
+
 ## [0.3.0] - 2026-11-15
 
 Lookups, level 1, on the server side, released together with `@jsudc/core`

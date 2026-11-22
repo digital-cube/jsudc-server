@@ -17,6 +17,7 @@ import {
   withHistoryFields,
 } from "@jsudc/core";
 import { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./array.js";
+import type { SourceContext } from "./source.js";
 
 /** The part of `fetch` the source uses; a test hands in its own. */
 export type FetchLike = (
@@ -362,7 +363,7 @@ export class HttpApiSource extends ArraySource {
   }
 
   /** For `describe`: the credential in use and the cache TTL. */
-  info(): SourceInfo {
+  info(_sctx?: SourceContext): SourceInfo {
     return { auth: this.auth, cache_ttl_ms: this.cacheTtlMs };
   }
 

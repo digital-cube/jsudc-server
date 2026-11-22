@@ -12,7 +12,7 @@ import {
 } from "@jsudc/core";
 import { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./array.js";
 import { notFound } from "./fields.js";
-import type { SourceListRequest } from "./source.js";
+import type { SourceContext, SourceListRequest } from "./source.js";
 
 /** The field whose `eq` condition picks the directory: navigation, not a filter. */
 export const PATH_FIELD = "path";
@@ -129,7 +129,7 @@ export class FilesystemSource extends ArraySource {
     return { rows, filter: rest, head };
   }
 
-  override async read(id: string): Promise<Row> {
+  override async read(id: string, _sctx?: SourceContext): Promise<Row> {
     const rel = normalizeRelPath(id);
     if (rel === "") throw notFound(id);
     const parent = posix.dirname(rel);

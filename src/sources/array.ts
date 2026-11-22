@@ -17,6 +17,7 @@ import {
   DEFAULT_PAGE_SIZE,
   type Source,
   type SourceAddField,
+  type SourceContext,
   type SourceListRequest,
   type SourceMutation,
   type SourceUpdateField,
@@ -152,23 +153,24 @@ export abstract class ArraySource implements Source {
     this.pageSizeDefault = opts.pageSizeDefault ?? DEFAULT_PAGE_SIZE;
   }
 
-  protected abstract load(req: SourceListRequest): Promise<ArrayLoad>;
+  /** The rows of one `list` (or `read`); `sctx` says who asks, for a subclass that cares. */
+  protected abstract load(req: SourceListRequest, sctx?: SourceContext): Promise<ArrayLoad>;
 
   /** The order of a `list` that asks for none (ties are always broken by id). */
   protected readonly defaultSort: SortKey[] = [];
   /** Without a sort (and no `defaultSort`), serve the rows in the order `load` gave them. */
   protected readonly keepOrder: boolean = false;
 
-  async describe(): Promise<SchemaDoc> {
+  async describe(_sctx?: SourceContext): Promise<SchemaDoc> {
     return this.schema;
   }
 
-  async list(req: SourceListRequest): Promise<ListResponse> {
+  async list(req: SourceListRequest, sctx?: SourceContext): Promise<ListResponse> {
     assertQueryFields(this.schema, req.filter, req.sort);
     if (req.page?.cursor != null) {
       throw new UdcError("unsupported_op", `${this.label} pages by offset only (paging: offset)`);
     }
-    const loaded = await this.load(req);
+    const loaded = await this.load(req, sctx);
     const offset = req.page?.offset ?? 0;
     const limit = req.page?.limit ?? this.pageSizeDefault;
     const page = queryRows(loaded.rows, this.schema, {
@@ -182,26 +184,26 @@ export abstract class ArraySource implements Source {
     return { ...loaded.extra, rows: page.rows, next_cursor: null, total: page.total };
   }
 
-  async read(id: string): Promise<Row> {
-    const { rows } = await this.load({});
+  async read(id: string, sctx?: SourceContext): Promise<Row> {
+    const { rows } = await this.load({}, sctx);
     const row = rows.find((r) => r.__meta.id === id);
     if (!row) throw notFound(id);
     return row;
   }
 
-  async mutate(_m: SourceMutation): Promise<Row> {
+  async mutate(_m: SourceMutation, _sctx?: SourceContext): Promise<Row> {
     throw this.readOnly("mutate: false");
   }
 
-  addField(_req: SourceAddField): Promise<SchemaDoc> {
+  addField(_req: SourceAddField, _sctx?: SourceContext): Promise<SchemaDoc> {
     return Promise.reject(this.readOnly("schema_edit: false"));
   }
 
-  updateField(_req: SourceUpdateField): Promise<SchemaDoc> {
+  updateField(_req: SourceUpdateField, _sctx?: SourceContext): Promise<SchemaDoc> {
     return Promise.reject(this.readOnly("schema_edit: false"));
   }
 
-  softDeleteField(_field: string): Promise<SchemaDoc> {
+  softDeleteField(_field: string, _sctx?: SourceContext): Promise<SchemaDoc> {
     return Promise.reject(this.readOnly("schema_edit: false"));
   }
 

@@ -6,13 +6,24 @@ export {
   type UdcSwaggerOptions,
   udcPlugin,
 } from "./app.js";
-export { BLOB_MAX_BYTES, BLOB_ROUTE, BLOB_TYPES, registerBlobRoute } from "./blob.js";
+export {
+  BLOB_MAX_BYTES,
+  BLOB_ROUTE,
+  BLOB_TYPES,
+  type BlobRouteOptions,
+  registerBlobRoute,
+} from "./blob.js";
 export { deriveColumns } from "./columns.js";
 export { connect, type Db, type DbHandle, type Executor } from "./db/client.js";
 export { ensureUdcSchema, UDC_MIGRATIONS_DIR, udcMigrations } from "./db/ensure.js";
 export { collectionTable, createCollectionTableSql, udcSchemaRevisions } from "./db/schema.js";
 export { buildDescribe, filterableFields } from "./describe.js";
-export { createDispatcher, Dispatcher, type DispatchLogger } from "./dispatcher.js";
+export {
+  createDispatcher,
+  Dispatcher,
+  type DispatcherOptions,
+  type DispatchLogger,
+} from "./dispatcher.js";
 export {
   assertLookupTarget,
   assertRegistryLinks,
@@ -28,6 +39,17 @@ export {
   readCollectionAssets,
 } from "./registry.js";
 export { activeSchema, wireVersion, writeSchemaRevision } from "./schema-store.js";
+export {
+  type AccessRequest,
+  andFilters,
+  describeWithout,
+  openCollection,
+  type RowScopeOptions,
+  rowScopePins,
+  ScopedCollection,
+  TENANT_WIDE_ACTIONS,
+  withoutFields,
+} from "./scope.js";
 export { type SeedOptions, type SeedResult, seedCollection } from "./seed.js";
 export { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./sources/array.js";
 export {
@@ -52,6 +74,7 @@ export { PostgresJsonbSource, type PostgresJsonbSourceOptions } from "./sources/
 export type {
   Source,
   SourceAddField,
+  SourceContext,
   SourceListRequest,
   SourceMutation,
   SourceReindex,

@@ -72,12 +72,21 @@ and returns the instance, for a server that is nothing but UDC.
 
 ### The plugin's options
 
-| Option       | What                                                                                                                                                                        |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dispatcher` | `createDispatcher(registry, {log})`; `log.error` receives what fails inside an action                                                                                       |
-| `registry`   | enables `GET /udc/files/blob?collection=&path=`, the file previews of filesystem collections whose view sets `folder_options.preview`                                       |
-| `checkLinks` | with `registry`: check every lookup and `row_link` against the active schemas before serving (`checkRegistryLinks`). Default `true`                                         |
-| `swagger`    | `true` (default), `false`, or `{routePrefix, title, version, description}`. Needs the optional peers `@fastify/swagger`, `@fastify/swagger-ui`, `fastify-type-provider-zod` |
+| Option       | What                                                                                                                                                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dispatcher` | `createDispatcher(registry, {log})`; `log.error` receives what fails inside an action                                                                                                                                               |
+| `registry`   | enables `GET /udc/files/blob?collection=&path=`, the file previews of filesystem collections whose view sets `folder_options.preview`                                                                                               |
+| `checkLinks` | with `registry`: check every lookup and `row_link` against the active schemas before serving (`checkRegistryLinks`). Default `true`                                                                                                 |
+| `swagger`    | `true` (default), `false`, or `{routePrefix, title, version, description}`. Needs the optional peers `@fastify/swagger`, `@fastify/swagger-ui`, `fastify-type-provider-zod`                                                         |
+| `context`    | `(request) => ctx`, sync or async: who is asking. Handed to every action, the dispatcher's `rowScope` / `access` and every source method; throw a `UdcError` to refuse. See [Request context and scope](#request-context-and-scope) |
+
+`createDispatcher(registry, options)` takes, beside `log`:
+
+| Option            | What                                                                                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rowScope`        | `(ctx, collection) => FilterNode \| undefined`: the row filter a request is held to on a collection; `undefined` is no limit                             |
+| `access`          | `(ctx, {action, collection}) => boolean \| undefined`: `false` hides the collection, `true` lets a scoped request run `schema.*` and `source.read` on it |
+| `showScopeFields` | collection names whose scope fields stay visible (shown, filterable, sortable); by default a scope's fields are hidden from the client                   |
 
 The plugin keeps its validator, serializer and error handler inside its own
 Fastify context, so the host's other routes are not affected. A `prefix` given
@@ -243,25 +252,156 @@ came (a string or an integer), and sorts and filters on the key.
 `row_link` needs nothing on the server beyond that check: the client opens
 the linked collection with an ordinary `eq` filter.
 
+## Request context and scope
+
+A host tells jsudc **who is asking** on every request, and holds each request
+to a row filter per collection that no client can send, see or lift. jsudc
+knows nothing of users, sessions or tenants: the host answers both questions.
+
+- **`context`** (plugin option) turns the Fastify request into a value of your
+  own, `ctx`. It runs once per `POST /udc/:action` and once per file preview.
+  `Dispatcher.dispatch(msg, ctx?)` carries it to every handler — your own
+  actions included: `dispatcher.register("whoami", schema, (payload, ctx) => …)`
+  (a one-argument handler still works) — and, as `SourceContext`
+  (`{ctx, collection, rowScope?}`), to every `Source` method as a trailing
+  optional argument. A dispatcher driven without HTTP passes its own `ctx`.
+- **`rowScope`** (dispatcher option) answers the filter (core's filter DSL)
+  `ctx` is held to on a collection. It is called `rowScope`, not `scope`, so it
+  cannot be confused with the `scope` of a `reindex` request (the kanban column
+  to renumber). It is enforced in one generic layer around every source
+  (`ScopedCollection`), a source of your own included, and additionally inside
+  the SQL of `postgres_jsonb` (`enforcesRowScope: true`), where the check and
+  the write are one statement.
+- **`access`** (dispatcher option) hides a collection from a `ctx` (`false`),
+  or lets a scoped `ctx` edit what every tenant shares (`true`).
+
+### Worked example: a `message` collection per tenant and user
+
+The tenant comes from the host name, the user from a session cookie; an
+anonymous request is refused.
+
+```ts
+import { unauthenticatedError, UdcError, type FilterNode } from "@jsudc/core";
+import { buildApp, createDispatcher } from "@jsudc/server";
+
+interface Ctx {
+  tenant: string;
+  user: string;
+  admin: boolean;
+}
+
+const dispatcher = createDispatcher<Ctx>(registry, {
+  log: app.log,
+  // One rule, stated once: a message belongs to a tenant and a user.
+  rowScope: (ctx, collection) =>
+    collection === "message"
+      ? {
+          and: [
+            { field: "tenant", op: "eq", value: ctx.tenant },
+            { field: "owner", op: "eq", value: ctx.user },
+          ],
+        }
+      : undefined,
+  // Only a tenant admin may add a field to `message` (it changes it for every tenant).
+  access: (ctx, { action, collection }) =>
+    collection === "audit_log" && !ctx.admin
+      ? false
+      : action.startsWith("schema.") && ctx.admin
+        ? true
+        : undefined,
+});
+
+await app.register(udcPlugin, {
+  dispatcher,
+  registry,
+  context: async (request): Promise<Ctx> => {
+    const tenant = request.hostname.split(".")[0]; // acme.example.com → acme
+    const session = await sessions.get(request.cookies.sid); // your session store
+    if (!session) throw unauthenticatedError(); // forbidden, details.reason "unauthenticated"
+    if (session.tenant !== tenant) throw new UdcError("forbidden", "not a member of this tenant");
+    return { tenant, user: session.user, admin: session.admin };
+  },
+});
+```
+
+An anonymous `POST /udc/list` is answered in-protocol, HTTP 200:
+
+```json
+{
+  "kind": "udc.list.err",
+  "id": "",
+  "payload": {
+    "code": "forbidden",
+    "message": "not signed in",
+    "details": { "reason": "unauthenticated" }
+  }
+}
+```
+
+(`isUnauthenticated(err)` of `@jsudc/core` tells it apart on the client; the
+file preview route answers 401 for it and 403 for any other `UdcError`.
+Anything else thrown by `context` is `internal`, logged, its message not sent.)
+
+What each action answers for a row of `message` outside the scope:
+
+| Action                                                                   | Answer                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`                                                                   | not there: `{and: [rowScope, clientFilter]}`; `total` counts in-scope rows; cursor and offset paging both. A lookup's labels (a `list` with `in` on ids) resolve to nothing                                                                                                                  |
+| `read`                                                                   | `not_found`, the same message and details as an id that does not exist (never `forbidden`: existence does not leak)                                                                                                                                                                          |
+| `mutate` update / delete                                                 | `not_found` as above, nothing written (with `expected_version` too: no `version_conflict` for it)                                                                                                                                                                                            |
+| `mutate` insert                                                          | every top-level `eq` of the scope (`tenant`, `owner`) is written into the row, over whatever the client sent; a patch naming such a field gets it overwritten the same way. A row that would still fall outside the scope (a non-`eq` part) is `forbidden`, `details.reason: "out_of_scope"` |
+| `reindex`                                                                | the scope is ANDed with the request's own `scope`; only in-scope rows are renumbered (a source without `enforcesRowScope` takes only `eq` scopes here, else `forbidden`)                                                                                                                     |
+| `tree.reparent`                                                          | node or new parent outside → `not_found`; on `postgres_jsonb` the subtree and children-count statements stay inside the scope                                                                                                                                                                |
+| `GET /udc/files/blob`                                                    | 404, as for a missing file (the file's row is checked against the scope)                                                                                                                                                                                                                     |
+| `schema.add_field` / `update_field` / `soft_delete_field`, `source.read` | they act for every tenant: on a collection with a scope for this `ctx`, `forbidden` unless `access` answers `true` for that action; `describe` and `collections` then report `schema_edit: false`, `source_yaml: false`                                                                      |
+| a collection `access` answers `false` for                                | left out of `collections` (asked with action `collections`), and every action on it is `not_found` like an unknown collection (the file route: 404, asked with action `read`)                                                                                                                |
+
+**The scope's fields are hidden.** By default the fields a scope names
+(`tenant`, `owner` above) are left out of `describe` (`schema.fields`,
+`field_order`, `view.columns`, `filterable`, `view.search.fields`,
+`view.filters`) and out of every row `list`, `read` and `mutate` answer; a
+client filter, sort, row value or `reindex` scope naming one is answered
+exactly as an unknown field (`validation_error`). To show the owner column,
+list the collection in `showScopeFields: ["message"]`: the field is then
+visible, filterable and sortable, and a client filter on it is still ANDed
+with the scope (`{tenant: "other"}` simply matches nothing).
+
+Without `context`, `rowScope` and `access`, nothing changes.
+
+### Writing a source that knows the scope
+
+A source of your own needs nothing: the generic layer ANDs the scope into the
+`list` filter (and drops any row the source answers outside it), reads the row
+before `read`, `mutate` and `tree.reparent` to answer `not_found`, and checks
+the row an insert or update would write. That read-then-write is two steps;
+a source that can do better sets `readonly enforcesRowScope = true` and applies
+`sctx.rowScope` inside its own statements, as `PostgresJsonbSource` does (the
+scope in the `WHERE`, and on the `RETURNING` row of a write in a transaction).
+The `SourceContext` also carries `ctx`, for a source that forwards the user
+upstream.
+
 ## API
 
-| Export                                                                                                   | What                                                                                     |
-| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                              | the Fastify plugin, and a Fastify instance with it registered                            |
-| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                       | every action wired to a registry; `Dispatcher` to register actions of your own           |
-| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`            | read a collection directory; the served collections                                      |
-| `makeSource`, `SourceDeps`                                                                               | the source `source.yaml` asks for                                                        |
-| `PostgresJsonbSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`             | the five sources, usable directly                                                        |
-| `ArraySource`, `Source` and its request types                                                            | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
-| `connect`, `Db`, `DbHandle`, `Executor`                                                                  | a drizzle database over a `pg` pool                                                      |
-| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                 | the library's SQL                                                                        |
-| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                      | the tables, for drizzle and for plain SQL                                                |
-| `seedCollection`                                                                                         | schema revision 1 and the rows of a Postgres collection                                  |
-| `activeSchema`, `writeSchemaRevision`                                                                    | the schema store under the schema edits                                                  |
-| `buildDescribe`, `filterableFields`, `deriveColumns`                                                     | what `describe` answers, for a custom action                                             |
-| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
-| `registerBlobRoute`, `BLOB_ROUTE`                                                                        | the file preview route on its own                                                        |
-| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar` | the pieces the http_api and filesystem sources are made of                               |
+| Export                                                                                                                        | What                                                                                     |
+| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                   | the Fastify plugin, and a Fastify instance with it registered                            |
+| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                            | every action wired to a registry; `Dispatcher` to register actions of your own           |
+| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                 | read a collection directory; the served collections                                      |
+| `makeSource`, `SourceDeps`                                                                                                    | the source `source.yaml` asks for                                                        |
+| `PostgresJsonbSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                                  | the five sources, usable directly                                                        |
+| `ArraySource`, `Source` and its request types                                                                                 | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
+| `connect`, `Db`, `DbHandle`, `Executor`                                                                                       | a drizzle database over a `pg` pool                                                      |
+| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                      | the library's SQL                                                                        |
+| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                           | the tables, for drizzle and for plain SQL                                                |
+| `seedCollection`                                                                                                              | schema revision 1 and the rows of a Postgres collection                                  |
+| `activeSchema`, `writeSchemaRevision`                                                                                         | the schema store under the schema edits                                                  |
+| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                          | what `describe` answers, for a custom action                                             |
+| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                     | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
+| `registerBlobRoute`, `BLOB_ROUTE`                                                                                             | the file preview route on its own                                                        |
+| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                      | the request context and the row scope (see above)                                        |
+| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS` | the generic row-scope layer, for a route of your own that reaches rows                   |
+| `BlobRouteOptions`                                                                                                            | `registerBlobRoute(app, registry, {context, scope})`                                     |
+| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                      | the pieces the http_api and filesystem sources are made of                               |
 
 ## Develop
 
