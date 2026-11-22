@@ -83,11 +83,12 @@ and returns the instance, for a server that is nothing but UDC.
 
 `createDispatcher(registry, options)` takes, beside `log`:
 
-| Option            | What                                                                                                                                                     |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rowScope`        | `(ctx, collection) => FilterNode \| undefined`: the row filter a request is held to on a collection; `undefined` is no limit                             |
-| `access`          | `(ctx, {action, collection}) => boolean \| undefined`: `false` hides the collection, `true` lets a scoped request run `schema.*` and `source.read` on it |
-| `showScopeFields` | collection names whose scope fields stay visible (shown, filterable, sortable); by default a scope's fields are hidden from the client                   |
+| Option            | What                                                                                                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rowScope`        | `(ctx, collection) => FilterNode \| undefined`: the row filter a request is held to on a collection; `undefined` is no limit                                                 |
+| `access`          | `(ctx, {action, collection}) => boolean \| undefined`: `false` hides the collection, `true` lets a scoped request run `schema.*` and `source.read` on it                     |
+| `showScopeFields` | collection names whose scope fields stay visible (shown, filterable, sortable); by default a scope's fields are hidden from the client                                       |
+| `mutateManyLimit` | the most rows one `mutate_many` request may touch; more is a `validation_error`, nothing written. Default 10 000. See [`mutate_many`](#mutate_many-many-rows-in-one-request) |
 
 The plugin keeps its validator, serializer and error handler inside its own
 Fastify context, so the host's other routes are not affected. A `prefix` given
@@ -637,8 +638,8 @@ call it the same way.
   `before` is the row as it was (update, delete; `null` on insert), `after`
   the row as written (insert, update; `null` on delete), `patch` what the
   request wrote (the patch of an update, the fields of an insert, `null` on
-  delete). Nothing in it is particular to a single-row request: a bulk action
-  (0.5.0) calls the same hook once per row.
+  delete). Nothing in it is particular to a single-row request: `mutate_many`
+  calls the same hook once per row (see [`mutate_many`](#mutate_many-many-rows-in-one-request)).
 - **`tx`** is an `Executor` on the source's own transaction, for the host's
   SQL: it commits with the row and rolls back with it.
 - It returns nothing, or a row: a returned row is what the caller receives
@@ -730,12 +731,153 @@ What the user's grid gets for `mutate {op: "update", id, row: {seen: true}}`:
 The same option on `PostgresJsonbSource({ db, table, initialSchema, onMutate })`
 behaves the same; with it, each of its mutations runs in a transaction.
 
+## `mutate_many`: many rows in one request
+
+`mutate_many` (`@jsudc/core`'s action) changes or deletes many rows of a
+collection in one request: `{ collection, op: "update" | "delete", ids? ,
+filter?, except_ids?, row? }`, answered with `{ updated, failed }`. Every
+collection that serves `mutate` serves it, and says so with
+`capabilities.mutate_many: true` (a source may set it `false` to refuse it).
+
+**Context, scope and access** are those of `mutate`. The request runs under
+the plugin's `context`, the dispatcher's `rowScope` and `access`:
+
+- **By ids**, the rows of the list that exist inside the caller's scope are
+  changed; every other id is reported in `failed` as `not_found` — a missing
+  row and another tenant's row are indistinguishable, as in `mutate`. A
+  repeated id counts once.
+- **By filter**, the client's filter is ANDed with the scope, minus
+  `except_ids`. A hidden scope field in the filter is refused like an unknown
+  field.
+- **The patch** is validated once, up front: an invalid one is a
+  `validation_error` for the whole request and nothing is written. Read-only
+  fields (`postgres_table`) and hidden scope fields are refused as in
+  `mutate`; a field the scope pins keeps the caller's value. A patch that
+  would take a row out of the scope is refused (`forbidden`,
+  `reason: "out_of_scope"`) and nothing is written.
+- Each changed row gets its version bumped. There is no `expected_version`.
+
+**One transaction** in both Postgres sources. The target rows are locked in
+id order; without `onMutate` a single `UPDATE` / `DELETE` writes them all.
+With `onMutate` they are written row by row inside the same transaction and
+the hook is called for each with its `before` / `after` (`patch` is the
+request's patch): **a hook failure rolls the whole request back** and is
+answered as the error, exactly as for `mutate` — all or nothing; `failed`
+only ever lists ids that were not there.
+
+**The cap.** `createDispatcher(registry, { mutateManyLimit })` bounds how
+many rows one request may touch (default `DEFAULT_MUTATE_MANY_LIMIT`,
+10 000). More ids than that, or a filter matching more (counted after
+`except_ids`, inside the scope), is a `validation_error` with
+`details: { reason: "too_many_rows", limit, by: "ids" | "filter" }`, before
+anything is written. The sources count with a bounded query (`LIMIT
+limit + 1`), not with `count(*)`, so it works on a collection with
+`total_count: false`.
+
+**Other sources.** A source without a native `mutateMany` (`memory`, a
+host's own `Source`) gets the generic one: the dispatcher validates the
+patch, reads the rows in scope (by id, or by paging the filter), checks the
+cap and the scope, then calls the source's `mutate` for each. Everything
+that can be refused is refused before the first write, but there is no
+transaction: a source failing midway leaves the rows before it changed. A
+source of your own may implement `mutateMany(req, sctx)` (`SourceMutateMany`,
+`MutateManyResult`) to do it natively; it is called when the source applies
+the row scope itself (`enforcesRowScope`) or the request has none.
+
+```ts
+import { UdcClient } from "@jsudc/core";
+
+// Tenant "a" archives its whole inbox but two threads: one request, one
+// transaction; tenant "b"'s inbox is not touched, whatever the filter says.
+const client = new UdcClient({ httpUrl: "", headers: { "x-tenant": "a" } });
+const { updated, failed } = await client.mutateMany({
+  collection: "message",
+  op: "update",
+  filter: { field: "folder", op: "eq", value: "inbox" },
+  except_ids: [pinnedA, pinnedB],
+  row: { archived: true },
+});
+// updated: how many of a's inbox rows were archived; failed: [] (by filter, nothing can be missing)
+
+await client.mutateMany({ collection: "message", op: "delete", ids: [id1, idOfTenantB] });
+// { updated: 1, failed: [{ id: idOfTenantB, code: "not_found", message: "no row with id …" }] }
+```
+
+## Host actions
+
+A host serves actions of its own next to the built-in ones. Define each once
+with `@jsudc/core`'s `defineHostAction` — name, request schema, response
+schema — in a module the server and the browser both import, and register it
+on the dispatcher: `dispatcher.register(action, handler)`. The handler's
+payload is the request schema's output, its return value is typed by the
+response schema, and it receives the request context (the plugin's
+`context`) as its second argument. The dispatcher validates the payload (a
+bad one is `validation_error`, the handler is not called), the plugin serves
+it at `POST /udc/<name>`, and the OpenAPI document shows it with its request
+and its response. A `UdcError` the handler throws is answered as it is;
+anything else is `internal` and logged. `register(name, schema, handler)`
+stays for an action without a shared definition.
+
+### Worked example: archive a thread
+
+```ts
+// shared/actions.ts — imported by the server and the browser
+import { defineHostAction } from "@jsudc/core";
+import { z } from "zod";
+
+export const archiveThread = defineHostAction({
+  name: "mail.archive_thread",
+  request: z.object({ thread: z.string().min(1) }),
+  response: z.object({ archived: z.number().int() }),
+});
+```
+
+```ts
+// server
+import { UdcError } from "@jsudc/core";
+import { buildApp, createDispatcher } from "@jsudc/server";
+import { archiveThread } from "../shared/actions.js";
+
+type Ctx = { tenant: string; user: string };
+
+const dispatcher = createDispatcher<Ctx>(registry, { log, rowScope });
+dispatcher.register(archiveThread, async ({ thread }, ctx: Ctx) => {
+  // The protocol itself, under the same context and scope: only the caller's rows.
+  const res = await dispatcher.dispatch(
+    {
+      kind: "udc.mutate_many",
+      id: "",
+      payload: {
+        collection: "message",
+        op: "update",
+        filter: { field: "thread", op: "eq", value: thread },
+        row: { archived: true },
+      },
+    },
+    ctx,
+  );
+  if (res.kind.endsWith(".err")) throw new UdcError("internal", "archive failed");
+  return { archived: (res.payload as { updated: number }).updated };
+});
+const app = await buildApp({ dispatcher, context: (req) => sessionOf(req) });
+```
+
+```ts
+// browser
+import { UdcClient } from "@jsudc/core";
+import { archiveThread } from "../shared/actions.js";
+
+const client = new UdcClient({ httpUrl: "" });
+const { archived } = await client.call(archiveThread, { thread: "t42" }); // typed
+```
+
 ## API
 
 | Export                                                                                                                             | What                                                                                     |
 | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                        | the Fastify plugin, and a Fastify instance with it registered                            |
 | `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                 | every action wired to a registry; `Dispatcher` to register actions of your own           |
+| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                   | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap  |
 | `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                      | read a collection directory; the served collections                                      |
 | `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for                                                        |
 | `PostgresJsonbSource`, `PostgresTableSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                | the six sources, usable directly                                                         |

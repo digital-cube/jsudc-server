@@ -7,6 +7,42 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The `mutate_many` action (`@jsudc/core`): update or delete many rows in one
+  request, by `ids` or by `filter` minus `except_ids`, under the context,
+  row scope and access rules of `mutate`. An id that is missing or outside
+  the scope is reported in `failed` as `not_found` and left alone; a filter
+  is ANDed with the scope. The patch is validated once, before anything is
+  written (read-only and hidden scope fields refused, pins kept); a patch
+  that would take a row out of the scope refuses the request. Each changed
+  row's version is bumped; no `expected_version`.
+- `PostgresJsonbSource` and `PostgresTableSource` implement it natively in
+  one transaction: the target rows locked in id order, one `UPDATE` /
+  `DELETE` without `onMutate`; with it, row by row, the hook called per row
+  with `before` / `after`, and a hook failure rolls the whole request back.
+- `createDispatcher` option `mutateManyLimit` (default
+  `DEFAULT_MUTATE_MANY_LIMIT`, 10 000): more ids, or a filter matching more
+  rows (counted with a bounded query, so with `total_count: false` too), is a
+  `validation_error` with `details.reason: "too_many_rows"`, nothing written.
+- A generic `mutate_many` for any source without a native one (`memory`, a
+  host's own): the rows read under scope, the checks done, then `mutate` per
+  row. `Source.mutateMany?(req, sctx)` (`SourceMutateMany`,
+  `MutateManyResult`) lets a host's source do it natively.
+- `capabilities.mutate_many` is `true` wherever `mutate` is (`describe`,
+  `collections`), unless a source sets it `false`.
+- Host actions typed end to end: `Dispatcher.register(action, handler)` takes
+  a `HostAction` from `@jsudc/core`'s `defineHostAction`; the handler
+  (`HostActionHandler`) is typed from it and receives the request context,
+  the payload is validated with its request schema, and the OpenAPI document
+  shows its response schema (`Dispatcher.responseOf(action)`).
+  `register(name, schema, handler)` is unchanged.
+
+### Changed
+
+- `@jsudc/core` devDependency at core's `release-0.5.0` head (the peer stays
+  `^0.4.0` until the release tickets).
+
 ## [0.4.0] - 2026-11-22
 
 Request context and a host-imposed row scope, the `postgres_table` source
