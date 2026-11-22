@@ -83,14 +83,45 @@ describe("ChangeFeed.notify", () => {
     return got;
   }
 
-  it("defaults op to update; rows without __meta.id name no ids", async () => {
+  it("defaults op to update; rows without __meta.id: no ids, even ids given", async () => {
     const feed = createChangeFeed({ coalesce: false });
     const a = listen(feed, tenantA);
     await feed.notify("m", { rows: [{ tenant: "a" }, { tenant: "b" }] });
     await feed.notify("m", { op: "delete", ids: ["7"], rows: [{ tenant: "a" }] });
     expect(a).toEqual([
       { collection: "m", op: "update" },
-      { collection: "m", op: "delete", ids: ["7"] },
+      { collection: "m", op: "delete" },
+    ]);
+  });
+
+  it("never hands a scope the ids of another scope's rows", async () => {
+    const feed = createChangeFeed({ coalesce: false, maxIds: 2 });
+    const a = listen(feed, tenantA);
+    // Rows that name no id, with ids given: the ids are not sent.
+    await feed.notify("m", { ids: ["mine", "theirs"], rows: [{ tenant: "a" }, { tenant: "b" }] });
+    // A match whose own ids are too many: no ids anywhere.
+    await feed.publish({
+      collection: "m",
+      op: "update",
+      ids: ["1"],
+      match: [
+        { ids: ["1", "2", "3"], values: { tenant: "a" } },
+        { ids: ["4"], values: { tenant: "b" } },
+      ],
+    });
+    // A notice without ids: the matches' own ids still say which rows.
+    await feed.publish({
+      collection: "m",
+      op: "delete",
+      match: [
+        { ids: ["5"], values: { tenant: "a" } },
+        { ids: ["6"], values: { tenant: "b" } },
+      ],
+    });
+    expect(a).toEqual([
+      { collection: "m", op: "update" },
+      { collection: "m", op: "update" },
+      { collection: "m", op: "delete", ids: ["5"] },
     ]);
   });
 

@@ -318,10 +318,13 @@ export class ChangeFeed {
           ? { values: scopeValues(row) }
           : { ids: [id], values: scopeValues(row) };
       });
-      if (!ids) {
-        const named = opts.rows.map(rowId);
-        if (named.length > 0 && named.every((id) => id !== undefined))
-          ids = unique(named as string[]);
+      const named = opts.rows.map(rowId);
+      if (named.length > 0 && named.every((id) => id !== undefined)) {
+        ids ??= unique(named as string[]);
+      } else {
+        // A row that names no id would stand for every id given, other scopes' rows among
+        // them: without ids for every row, the event says only "this collection changed".
+        ids = undefined;
       }
     } else if (opts.ctx !== undefined) {
       const scope = this.scope.rowScope?.(opts.ctx, collection);
@@ -386,18 +389,19 @@ export class ChangeFeed {
 
   /** Publish a notice on the bus; a failing bus is logged, never thrown into a committed write. */
   async publish(notice: ChangeNotice): Promise<void> {
-    const ids = notice.ids && notice.ids.length > this.maxIds ? undefined : notice.ids;
-    const match = notice.match?.map((m) =>
-      m.ids && m.ids.length > this.maxIds ? { values: m.values } : m,
-    );
+    // Too many ids anywhere: none at all. A match whose ids were dropped would otherwise stand
+    // for the notice's ids, other scopes' rows among them.
+    const tooMany =
+      (notice.ids?.length ?? 0) > this.maxIds ||
+      (notice.match ?? []).some((m) => (m.ids?.length ?? 0) > this.maxIds);
+    const ids = tooMany ? undefined : notice.ids;
+    const match = notice.match?.map((m) => (tooMany ? { values: m.values } : m));
     const capped: ChangeNotice = {
       collection: notice.collection,
       op: notice.op,
       ...(ids ? { ids } : {}),
       ...(match ? { match } : {}),
     };
-    // Without ids on the notice, a match's ids would be all a scoped stream gets: drop them too.
-    if (!capped.ids && capped.match) capped.match = capped.match.map((m) => ({ values: m.values }));
     this.ensureListening();
     try {
       await this.bus.publish(capped);

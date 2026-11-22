@@ -1069,8 +1069,9 @@ After a write of your own, call `changes.notify(collection, { op?, ids?, ctx?, r
   `rowScope(ctx, collection)` are what the scope rule tests, so only streams
   in that scope (and unscoped ones) are told.
 - **`rows`**: the changed rows' values (any fields a scope tests; a
-  `__meta.id` names the row). Each scope is told only the ids of its own rows.
-  Preferred over `ctx` when both are given.
+  `__meta.id` names the row). Each scope is told only the ids of its own rows;
+  when a row names no id, the event carries no ids at all (it could otherwise
+  name another scope's rows). Preferred over `ctx` when both are given.
 - **`op`** defaults to `update`; no `ids` means "this collection changed".
 
 On a collection that has a row scope, a `notify` with neither `ctx` nor
