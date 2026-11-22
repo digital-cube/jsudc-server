@@ -34,6 +34,29 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 - `registerBlobRoute(app, registry, opts?)`: optional `BlobRouteOptions`
   (`context`, `scope`). Helpers `andFilters`, `rowScopePins`, `withoutFields`,
   `describeWithout`, `TENANT_WIDE_ACTIONS`.
+- `postgres_table` source (`PostgresTableSource`, `PostgresTableSourceOptions`,
+  `TableFieldSpec`), read side: a collection served from an ordinary relational
+  table with typed columns, or a `FROM` with joins given in code, through the
+  same filter / sort / keyset-cursor / offset compiler as `postgres_jsonb`.
+  Field → column or SQL expression (a computed field, e.g. a count from a join,
+  lists, sorts and filters; `filterable: false` / `sortable: false` refuse it
+  like an unknown field), id column of type `uuid` (default), `text` or
+  `integer`, optional version column, a base `where`, `totalCount: false` (no
+  `count(*)`, `total: null`, `capabilities.total_count: false`). The row scope
+  is compiled into the `WHERE` of `list` and `read`. `capabilities`: `mutate`,
+  `schema_edit`, `reindex`, `tree_reparent` false. `makeSource` builds it for
+  `kind: postgres_table` in `source.yaml` (table, id / version columns, field →
+  column names, `total_count`).
+- The SQL compiler is exported, around a field resolver: `compileFilter(node,
+  schema, resolve?)`, `compileSort`, `orderBy`, `sortKeyColumns`,
+  `cursorPredicate`, `encodeCursor`, `decodeCursor(cursor, keys, idType?)`,
+  `escapeLike`, `FieldResolver`, `jsonbResolver`, `columnResolver`, `SortTerm`,
+  `SqlCast`, `SqlIdType`, `SqlArrayForm`, `sqlCastFor`, `codePointOrder`,
+  `idParam`, `CursorValue`. Every `resolve` defaults to `jsonbResolver`, which
+  writes exactly the SQL text of 0.3.0 (the expression indexes and query plans
+  of `postgres_jsonb` are unchanged).
+- `Source.notFilterable` (optional): fields `describe` leaves out of
+  `filterable`.
 - Dev: `@jsudc/core` devDependency pinned to the `release-0.4.0` commit of
   core (for `unauthenticatedError` / `isUnauthenticated`) until core 0.4.0 is
   on npm.

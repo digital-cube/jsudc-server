@@ -255,7 +255,15 @@ export class ScopedCollection {
       docs: c.docs,
       source: this.source.info?.(this.sctx),
     });
-    return describeWithout(d, this.hidden);
+    const notFilterable = new Set(this.source.notFilterable ?? []);
+    const filterable =
+      notFilterable.size === 0
+        ? d
+        : {
+            ...d,
+            filterable: { fields: d.filterable.fields.filter((f) => !notFilterable.has(f.field)) },
+          };
+    return describeWithout(filterable, this.hidden);
   }
 
   async list(req: SourceListRequest): Promise<ListResponse> {

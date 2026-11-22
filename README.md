@@ -15,7 +15,8 @@ What is in the package:
   answers with the `.ok` / `.err` envelope;
 - the **collection registry**, which reads a collection directory and fails fast
   on an invalid document;
-- five **sources**: Postgres `jsonb`, memory, filesystem, HTTP API, YAML menu;
+- six **sources**: Postgres `jsonb`, a relational Postgres table, memory,
+  filesystem, HTTP API, YAML menu;
 - the **schema store**: revisions of a Postgres collection's schema, with the
   expression index of every `index: true` field kept in step;
 - **seeding** of a collection from its `schema.json` and rows;
@@ -130,13 +131,14 @@ A directory name is the collection name (`[a-z][a-z0-9_]*`). The documents'
 full dialect is defined by `@jsudc/core` (`ViewConfigSchema`,
 `SchemaDocSchema`, `SourceConfigSchema`).
 
-## The five sources
+## The six sources
 
 `source.yaml` picks one with `kind`:
 
 | `kind`                     | Rows                                                                                                | Writes                                      |
 | -------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | `postgres_jsonb` (default) | a table, every field in `data jsonb`; `options.table` overrides the name                            | mutate, schema edits, reindex, reparent     |
+| `postgres_table`           | an ordinary relational table with typed columns (see [below](#postgres_table-a-relational-table))   | read-only (for now)                         |
 | `memory`                   | `seed.json`, kept in the process                                                                    | mutate, reindex, reparent (lost on restart) |
 | `filesystem`               | the entries of one folder under `options.root` (relative to the collection directory, no `..`)      | read-only                                   |
 | `http_api`                 | one upstream call (`base_url`, `list_endpoint`, `field_map`, …) cached for `cache_ttl_ms`           | read-only                                   |
@@ -170,6 +172,171 @@ looked up:
 Pass `env: process.env` to honour them, a subset to choose, or nothing to turn
 them off. Paths (the collections directory, a fixture directory) are always
 arguments.
+
+### `postgres_table`: a relational table
+
+A collection can be served from a table you already have, with typed columns,
+or from a `FROM` with joins. Filters (all 14 operators), sort, the keyset cursor
+and offset paging behave as on `postgres_jsonb`: it is the same compiler (see
+[The SQL compiler](#the-sql-compiler)), resolving each field to a column instead
+of `data->>'field'`. Number, date, datetime and bool columns are compared as
+their own type (an integer column against a `numeric` parameter, so `2.5` never
+rounds); text is compared and sorted by code point (`COLLATE "C"`), so the
+results agree with `evaluateFilter`. The schema is the collection's
+`schema.json` (no revisions, no schema edits, no reindex, no tree reparent), and
+`mutate` is not offered yet. A NULL column is left out of the row, as a field
+missing from `data` is (`keepNulls: true` serves `null`).
+
+From `source.yaml`, only identifiers (lowercase snake_case, the table-name
+rule): the table, the id and version columns, field → column names and
+`total_count`.
+
+```yaml
+kind: postgres_table
+options:
+  table: message # default: the collection name
+  id_column: id # default: id
+  id_type: uuid # uuid (default) | text | integer — the cursor and read follow it
+  version_column: row_version # __meta.version; without it every row is version 1
+  columns:
+    subject: subject_line # a field without an entry reads the column of its own name
+  total_count: false # no count(*) next to the page; total is null
+```
+
+In code, register a `PostgresTableSource` yourself; it is the only way to give
+SQL: a `from` with joins, a field as an expression, a base `where`. That SQL is
+yours, written in code, never taken from a request.
+
+Worked example: a `message` table with typed columns and UUID ids, an
+`attachment` link table, and the attachment count as a computed field.
+
+```sql
+CREATE TABLE message (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant text NOT NULL,
+  subject text NOT NULL,
+  received_at timestamptz NOT NULL,
+  unread boolean NOT NULL DEFAULT true,
+  labels text[],
+  row_version integer NOT NULL DEFAULT 1,
+  deleted_at timestamptz
+);
+CREATE TABLE attachment (id serial PRIMARY KEY, message_id uuid REFERENCES message, name text);
+```
+
+```ts
+import { PostgresTableSource } from "@jsudc/server";
+
+registry.register({
+  name: "messages",
+  view: asset.view,
+  source: new PostgresTableSource({
+    db,
+    schema: asset.schema, // schema.json: tenant, subject, received_at, unread, labels, attachment_count
+    from: `message m
+      LEFT JOIN LATERAL (
+        SELECT count(*)::int AS n FROM attachment a WHERE a.message_id = m.id
+      ) ac ON true`,
+    idColumn: "m.id", // idType: "uuid" is the default
+    versionColumn: "m.row_version",
+    where: "m.deleted_at IS NULL", // ANDed into every statement
+    fields: {
+      tenant: "m.tenant",
+      subject: "m.subject",
+      received_at: "m.received_at",
+      unread: "m.unread",
+      labels: "m.labels", // string_array over text[] (array: "jsonb" for a jsonb column)
+      attachment_count: { sql: "ac.n" }, // computed: read, never written
+    },
+    totalCount: false, // a large mailbox: no count(*), total is null
+  }),
+});
+```
+
+`attachment_count` lists, sorts and filters (`gte 1`) like a column, because it
+has one value per row (a column of a `LATERAL` join, or a correlated subquery
+in `sql`). An aggregate over a grouped `FROM` would not be valid in a `WHERE`:
+mark such a field `{ sql: …, filterable: false, sortable: false }`. A field
+with `filterable: false` is refused in a filter exactly like an unknown field
+and left out of `describe.filterable`; `sortable: false` refuses it in a sort.
+The host's row scope may still use it.
+
+| Option               | What                                                                                      |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `schema`             | the collection's `schema.json`, parsed                                                    |
+| `table` / `from`     | exactly one: a table (`message`, `inbox.message`) or a `FROM` clause in SQL               |
+| `fields`             | field → column name, or `{ column \| sql, computed?, filterable?, sortable?, array? }`    |
+| `idColumn`, `idType` | the row id (`id`, `uuid`); `text` and `integer` ids page by cursor too                    |
+| `versionColumn`      | an integer column for `__meta.version`; without it `1`                                    |
+| `where`              | SQL ANDed into every statement (a soft delete, a fixed partition)                         |
+| `totalCount`         | `false`: no `count(*)`, `total: null`, `capabilities.total_count: false` (default `true`) |
+| `keepNulls`          | serve a NULL column as `null` instead of leaving it out                                   |
+| `pageSizeDefault`    | the page size without a `limit`                                                           |
+
+Every field of the schema must resolve: a field without an entry in `fields`
+reads the column of its own name. The row scope of a request (see
+[Request context and scope](#request-context-and-scope)) is compiled into the
+`WHERE` of `list` and `read`, next to the base `where` and the client filter
+(`enforcesRowScope`). A datetime is served in Postgres' ISO 8601 form
+(`2024-01-10T08:00:00+00:00`).
+
+## The SQL compiler
+
+The compiler behind both Postgres sources is exported, so a host that writes a
+source of its own over SQL does not re-implement the filter DSL. A
+`FieldResolver` says where each allowlisted field lives; the compiler does the
+rest (the allowlist, typed parameters, three-valued logic, NULLS LAST, the
+keyset predicate):
+
+```ts
+import {
+  codePointOrder,
+  compileFilter,
+  compileSort,
+  cursorPredicate,
+  decodeCursor,
+  encodeCursor,
+  type FieldResolver,
+  orderBy,
+  sortKeyColumns,
+} from "@jsudc/server";
+import { sql } from "drizzle-orm";
+
+const col = (field: string) => sql`${sql.identifier(`c_${field}`)}`;
+const resolve: FieldResolver = {
+  text: (field) => sql`(${col(field)}::text)`, // contains / starts_with / is_null
+  typed: (
+    field,
+    _def,
+    cast, // comparisons, ORDER BY, the cursor
+  ) => (cast === "text" ? codePointOrder(sql`${col(field)}::text`) : sql`(${col(field)})`),
+  array: (field) => ({ expr: col(field), form: "text[]" }), // string_array, lookup_array
+  id: sql`pk`,
+  idType: "integer",
+};
+
+const terms = compileSort(req.sort, schema, resolve); // refuses an unknown field
+const after = req.page?.cursor ? decodeCursor(req.page.cursor, terms.length, "integer") : null;
+let where = compileFilter(req.filter, schema, resolve); // a validation_error before any SQL runs
+if (after) where = sql`${where} AND ${cursorPredicate(terms, after.values, after.id, resolve)}`;
+const rows = await db.execute(sql`
+  SELECT pk${terms.length ? sql`, ${sortKeyColumns(terms)}` : sql``} FROM people
+  WHERE ${where} ORDER BY ${orderBy(terms, resolve)} LIMIT ${limit + 1}`);
+// next cursor: encodeCursor([...terms.map((_, i) => last[`__k${i}`] ?? null), String(last.pk)])
+```
+
+| Export                                                                                             | What                                                                                     |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `compileFilter(node, schema, resolve?)`                                                            | a filter tree as a `WHERE` expression; unknown fields and wrong values refused           |
+| `compileSort(sort, schema, resolve?)`                                                              | the sort keys as `SortTerm`s (typed expression and cursor cast)                          |
+| `orderBy(terms, resolve?)`                                                                         | `ORDER BY` the keys, NULLS LAST, then the row id ascending                               |
+| `sortKeyColumns(terms)`                                                                            | the sort values as text (`__k0`, `__k1`, …), selected to build the next cursor           |
+| `cursorPredicate(terms, values, id, resolve?)`                                                     | the rows strictly after a cursor position                                                |
+| `encodeCursor(parts)`, `decodeCursor(c, keys, idType?)`                                            | the cursor codec (base64url JSON, as udc-py); the id is checked against `idType`         |
+| `escapeLike(text)`                                                                                 | a LIKE pattern that matches literally                                                    |
+| `FieldResolver`, `SqlCast`, `SqlIdType`, `SqlArrayForm`, `sqlCastFor`, `codePointOrder`, `idParam` | the resolver contract and its helpers                                                    |
+| `jsonbResolver`                                                                                    | `postgres_jsonb`'s resolver (`data->>'f'`, a uuid `id`); the default of every `resolve?` |
+| `columnResolver({ fields, id, idType, arrayForms })`                                               | the resolver over typed columns that `PostgresTableSource` uses                          |
 
 ## The SQL the host must run
 
@@ -382,26 +549,27 @@ upstream.
 
 ## API
 
-| Export                                                                                                                        | What                                                                                     |
-| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                   | the Fastify plugin, and a Fastify instance with it registered                            |
-| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                            | every action wired to a registry; `Dispatcher` to register actions of your own           |
-| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                 | read a collection directory; the served collections                                      |
-| `makeSource`, `SourceDeps`                                                                                                    | the source `source.yaml` asks for                                                        |
-| `PostgresJsonbSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                                  | the five sources, usable directly                                                        |
-| `ArraySource`, `Source` and its request types                                                                                 | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
-| `connect`, `Db`, `DbHandle`, `Executor`                                                                                       | a drizzle database over a `pg` pool                                                      |
-| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                      | the library's SQL                                                                        |
-| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                           | the tables, for drizzle and for plain SQL                                                |
-| `seedCollection`                                                                                                              | schema revision 1 and the rows of a Postgres collection                                  |
-| `activeSchema`, `writeSchemaRevision`                                                                                         | the schema store under the schema edits                                                  |
-| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                          | what `describe` answers, for a custom action                                             |
-| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                     | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
-| `registerBlobRoute`, `BLOB_ROUTE`                                                                                             | the file preview route on its own                                                        |
-| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                      | the request context and the row scope (see above)                                        |
-| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS` | the generic row-scope layer, for a route of your own that reaches rows                   |
-| `BlobRouteOptions`                                                                                                            | `registerBlobRoute(app, registry, {context, scope})`                                     |
-| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                      | the pieces the http_api and filesystem sources are made of                               |
+| Export                                                                                                                             | What                                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                        | the Fastify plugin, and a Fastify instance with it registered                            |
+| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                 | every action wired to a registry; `Dispatcher` to register actions of your own           |
+| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                      | read a collection directory; the served collections                                      |
+| `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for                                                        |
+| `PostgresJsonbSource`, `PostgresTableSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                | the six sources, usable directly                                                         |
+| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, … | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
+| `ArraySource`, `Source` and its request types                                                                                      | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
+| `connect`, `Db`, `DbHandle`, `Executor`                                                                                            | a drizzle database over a `pg` pool                                                      |
+| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                           | the library's SQL                                                                        |
+| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                                | the tables, for drizzle and for plain SQL                                                |
+| `seedCollection`                                                                                                                   | schema revision 1 and the rows of a Postgres collection                                  |
+| `activeSchema`, `writeSchemaRevision`                                                                                              | the schema store under the schema edits                                                  |
+| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                               | what `describe` answers, for a custom action                                             |
+| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                          | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
+| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                  | the file preview route on its own                                                        |
+| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                           | the request context and the row scope (see above)                                        |
+| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`      | the generic row-scope layer, for a route of your own that reaches rows                   |
+| `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                     |
+| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                               |
 
 ## Develop
 
@@ -411,6 +579,13 @@ the database named in `TEST_DATABASE_URL` (default
 library's SQL in it and create the fixture tables (`test/global-setup.ts`).
 The fixture collections, one per source kind, are in
 `test/fixtures/collections/`.
+
+Vitest runs two projects: `udc-server` (every test file) and `postgres-table`,
+which runs the jsonb filter and paging suites (`pg-filter`, `pg-paging`,
+`pg-parity`, `pg-array`, `pg-allowlist`) a second time, unchanged, with
+`PostgresJsonbSource` aliased to `test/table-double/postgres-jsonb.ts`: a double
+that copies the rows into a table with real typed columns and serves it through
+`PostgresTableSource`.
 
 ```sh
 npm ci              # also builds dist (the prepare script)

@@ -7,6 +7,7 @@ import { FilesystemSource } from "./filesystem.js";
 import { type Env, type FetchLike, HttpApiSource, type SourceLog } from "./http-api.js";
 import { MemorySource } from "./memory.js";
 import { PostgresJsonbSource } from "./postgres-jsonb.js";
+import { PostgresTableSource } from "./postgres-table.js";
 import type { Source } from "./source.js";
 import { YamlMenuSource } from "./yaml-menu.js";
 
@@ -31,7 +32,7 @@ export function filesystemRoot(asset: CollectionAsset, root: string, env: Env): 
 }
 
 export interface SourceDeps {
-  /** Needed by postgres_jsonb collections only. */
+  /** Needed by postgres_jsonb and postgres_table collections only. */
   db?: Db | undefined;
   /**
    * The variables `UDC_*` overrides and `${VAR}` headers are read from: the
@@ -64,6 +65,21 @@ export function makeSource(asset: CollectionAsset, deps: SourceDeps): Source | n
         db: deps.db,
         table: source.options.table ?? asset.name,
         initialSchema: asset.schema,
+        pageSizeDefault,
+      });
+    }
+    case "postgres_table": {
+      if (!deps.db) throw new Error(`${asset.name}: a postgres_table collection needs a database`);
+      const o = source.options;
+      return new PostgresTableSource({
+        db: deps.db,
+        schema: asset.schema,
+        table: o.table ?? asset.name,
+        fields: o.columns,
+        idColumn: o.id_column,
+        idType: o.id_type,
+        versionColumn: o.version_column,
+        totalCount: o.total_count,
         pageSizeDefault,
       });
     }

@@ -52,6 +52,7 @@ export {
 } from "./scope.js";
 export { type SeedOptions, type SeedResult, seedCollection } from "./seed.js";
 export { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./sources/array.js";
+export { type CursorValue, decodeCursor, encodeCursor } from "./sources/cursor.js";
 export {
   cacheTtlEnvVar,
   filesystemRoot,
@@ -71,6 +72,13 @@ export {
 } from "./sources/http-api.js";
 export { MemorySource } from "./sources/memory.js";
 export { PostgresJsonbSource, type PostgresJsonbSourceOptions } from "./sources/postgres-jsonb.js";
+export {
+  type ColumnResolverOptions,
+  columnResolver,
+  PostgresTableSource,
+  type PostgresTableSourceOptions,
+  type TableFieldSpec,
+} from "./sources/postgres-table.js";
 export type {
   Source,
   SourceAddField,
@@ -82,6 +90,23 @@ export type {
   SourceUpdateField,
   TreeReparentResult,
 } from "./sources/source.js";
+export {
+  codePointOrder,
+  compileFilter,
+  compileSort,
+  cursorPredicate,
+  escapeLike,
+  type FieldResolver,
+  idParam,
+  jsonbResolver,
+  orderBy,
+  type SortTerm,
+  type SqlArrayForm,
+  type SqlCast,
+  type SqlIdType,
+  sortKeyColumns,
+  sqlCastFor,
+} from "./sources/sql.js";
 export {
   type MenuCollection,
   YamlMenuSource,

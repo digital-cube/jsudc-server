@@ -81,6 +81,12 @@ export interface Source {
    * `tree.reparent` to it; without it, the dispatcher reads the row first.
    */
   readonly enforcesRowScope?: boolean;
+  /**
+   * Schema fields the source refuses in a client filter (it answers
+   * `validation_error`, as for an unknown field): `describe` leaves them out
+   * of `filterable`. Absent: every field is filterable.
+   */
+  readonly notFilterable?: readonly string[];
   /** The active schema document, `version` in its wire form (`"v<n>"`). */
   describe(sctx?: SourceContext): Promise<SchemaDoc>;
   list(req: SourceListRequest, sctx?: SourceContext): Promise<ListResponse>;
