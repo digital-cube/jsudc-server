@@ -28,7 +28,7 @@ npm install @jsudc/server @jsudc/core fastify drizzle-orm pg zod
 # the OpenAPI docs at /docs (on by default):
 npm install @fastify/swagger @fastify/swagger-ui fastify-type-provider-zod
 # or straight from a GitHub tag:
-npm install github:digital-cube/jsudc-core#v0.4.0 github:digital-cube/jsudc-server#v0.4.0
+npm install github:digital-cube/jsudc-core#v0.5.0 github:digital-cube/jsudc-server#v0.5.0
 ```
 
 ## Quick start
@@ -83,11 +83,12 @@ and returns the instance, for a server that is nothing but UDC.
 
 `createDispatcher(registry, options)` takes, beside `log`:
 
-| Option            | What                                                                                                                                                     |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rowScope`        | `(ctx, collection) => FilterNode \| undefined`: the row filter a request is held to on a collection; `undefined` is no limit                             |
-| `access`          | `(ctx, {action, collection}) => boolean \| undefined`: `false` hides the collection, `true` lets a scoped request run `schema.*` and `source.read` on it |
-| `showScopeFields` | collection names whose scope fields stay visible (shown, filterable, sortable); by default a scope's fields are hidden from the client                   |
+| Option            | What                                                                                                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rowScope`        | `(ctx, collection) => FilterNode \| undefined`: the row filter a request is held to on a collection; `undefined` is no limit                                                 |
+| `access`          | `(ctx, {action, collection}) => boolean \| undefined`: `false` hides the collection, `true` lets a scoped request run `schema.*` and `source.read` on it                     |
+| `showScopeFields` | collection names whose scope fields stay visible (shown, filterable, sortable); by default a scope's fields are hidden from the client                                       |
+| `mutateManyLimit` | the most rows one `mutate_many` request may touch; more is a `validation_error`, nothing written. Default 10 000. See [`mutate_many`](#mutate_many-many-rows-in-one-request) |
 
 The plugin keeps its validator, serializer and error handler inside its own
 Fastify context, so the host's other routes are not affected. A `prefix` given
@@ -637,8 +638,8 @@ call it the same way.
   `before` is the row as it was (update, delete; `null` on insert), `after`
   the row as written (insert, update; `null` on delete), `patch` what the
   request wrote (the patch of an update, the fields of an insert, `null` on
-  delete). Nothing in it is particular to a single-row request: a bulk action
-  (0.5.0) calls the same hook once per row.
+  delete). Nothing in it is particular to a single-row request: `mutate_many`
+  calls the same hook once per row (see [`mutate_many`](#mutate_many-many-rows-in-one-request)).
 - **`tx`** is an `Executor` on the source's own transaction, for the host's
   SQL: it commits with the row and rolls back with it.
 - It returns nothing, or a row: a returned row is what the caller receives
@@ -730,30 +731,490 @@ What the user's grid gets for `mutate {op: "update", id, row: {seen: true}}`:
 The same option on `PostgresJsonbSource({ db, table, initialSchema, onMutate })`
 behaves the same; with it, each of its mutations runs in a transaction.
 
+## `mutate_many`: many rows in one request
+
+`mutate_many` (`@jsudc/core`'s action) changes or deletes many rows of a
+collection in one request: `{ collection, op: "update" | "delete", ids? ,
+filter?, except_ids?, row? }`, answered with `{ updated, failed }`. Every
+collection that serves `mutate` serves it, and says so with
+`capabilities.mutate_many: true` (a source may set it `false` to refuse it).
+
+**Context, scope and access** are those of `mutate`. The request runs under
+the plugin's `context`, the dispatcher's `rowScope` and `access`:
+
+- **By ids**, the rows of the list that exist inside the caller's scope are
+  changed; every other id is reported in `failed` as `not_found` — a missing
+  row and another tenant's row are indistinguishable, as in `mutate`. A
+  repeated id counts once.
+- **By filter**, the client's filter is ANDed with the scope, minus
+  `except_ids`. A hidden scope field in the filter is refused like an unknown
+  field.
+- **The patch** is validated once, up front: an invalid one is a
+  `validation_error` for the whole request and nothing is written. Read-only
+  fields (`postgres_table`) and hidden scope fields are refused as in
+  `mutate`; a field the scope pins keeps the caller's value. A patch that
+  would take a row out of the scope is refused (`forbidden`,
+  `reason: "out_of_scope"`) and nothing is written.
+- Each changed row gets its version bumped. There is no `expected_version`.
+
+**One transaction** in both Postgres sources. The target rows are locked in
+id order; without `onMutate` a single `UPDATE` / `DELETE` writes them all.
+With `onMutate` they are written row by row inside the same transaction and
+the hook is called for each with its `before` / `after` (`patch` is the
+request's patch): **a hook failure rolls the whole request back** and is
+answered as the error, exactly as for `mutate` — all or nothing; `failed`
+only ever lists ids that were not there.
+
+**The cap.** `createDispatcher(registry, { mutateManyLimit })` bounds how
+many rows one request may touch (default `DEFAULT_MUTATE_MANY_LIMIT`,
+10 000). More ids than that, or a filter matching more (counted after
+`except_ids`, inside the scope), is a `validation_error` with
+`details: { reason: "too_many_rows", limit, by: "ids" | "filter" }`, before
+anything is written. The sources count with a bounded query (`LIMIT
+limit + 1`), not with `count(*)`, so it works on a collection with
+`total_count: false`.
+
+**Other sources.** A source without a native `mutateMany` (`memory`, a
+host's own `Source`) gets the generic one: the dispatcher validates the
+patch, reads the rows in scope (by id, or by paging the filter), checks the
+cap and the scope, then calls the source's `mutate` for each. Everything
+that can be refused is refused before the first write, but there is no
+transaction: a source failing midway leaves the rows before it changed. A
+source of your own may implement `mutateMany(req, sctx)` (`SourceMutateMany`,
+`MutateManyResult`) to do it natively; it is called when the source applies
+the row scope itself (`enforcesRowScope`) or the request has none.
+
+```ts
+import { UdcClient } from "@jsudc/core";
+
+// Tenant "a" archives its whole inbox but two threads: one request, one
+// transaction; tenant "b"'s inbox is not touched, whatever the filter says.
+const client = new UdcClient({ httpUrl: "", headers: { "x-tenant": "a" } });
+const { updated, failed } = await client.mutateMany({
+  collection: "message",
+  op: "update",
+  filter: { field: "folder", op: "eq", value: "inbox" },
+  except_ids: [pinnedA, pinnedB],
+  row: { archived: true },
+});
+// updated: how many of a's inbox rows were archived; failed: [] (by filter, nothing can be missing)
+
+await client.mutateMany({ collection: "message", op: "delete", ids: [id1, idOfTenantB] });
+// { updated: 1, failed: [{ id: idOfTenantB, code: "not_found", message: "no row with id …" }] }
+```
+
+## Search answered by the source
+
+By default the search box is answered in the browser: `@jsudc/react` turns
+its text into `contains` conditions over `view.search.fields`. A collection
+whose rows have a real full-text index (a `tsvector` in Postgres, OpenSearch
+beside the database) can answer the text itself instead: it reports
+`capabilities.search: "source"`, the client sends the text as
+`ListRequest.search` and composes nothing, and the source matches it — and,
+when the request has no `sort`, may return the rows by relevance.
+
+**Never wider than the scope.** The dispatcher passes `search` to the source
+in `SourceListRequest` (trimmed; a blank text is no search). Whatever the
+source matches is ANDed with the caller's row scope and the client's filter,
+like any other condition: two tenants searching the same word each get only
+their own rows.
+
+**Refused, not ignored.** A collection whose source does not report the
+capability answers a `search` with `unsupported_op` (`details.field:
+"search"`) — it never ignores the text and lists every row. A source of your
+own that sets `capabilities.search: "source"` reads `req.search` in `list`.
+
+### On `postgres_table`: a `tsvector`
+
+The `search` option of `PostgresTableSource` says, in SQL written in code,
+how a row matches and how relevant it is. `match(q, text)` is a condition and
+`rank(q, text)` (optional) a number, higher first; `q` is the text as a bound
+parameter — it is never spliced into the statement — and `text` the same
+text, for a host that builds a parameter of its own from it. With the option
+the source reports `search: "source"`. A search with no `sort` comes by rank,
+ties by id, paged by offset (the `next_cursor` it hands out carries the next
+offset, so a client that walks by cursor walks a search too). With a `sort`,
+or without `rank`, the match is one more condition and the list is ordered
+and paged as usual.
+
+```sql
+-- The host's migration: a generated tsvector and its index.
+ALTER TABLE inbox.message ADD COLUMN tsv tsvector GENERATED ALWAYS AS (
+  setweight(to_tsvector('simple', coalesce(subject, '')), 'A') ||
+  setweight(to_tsvector('simple', coalesce(body_text, '')), 'B')) STORED;
+CREATE INDEX message_tsv ON inbox.message USING gin (tsv);
+```
+
+```ts
+import { loadRegistry, makeSource, PostgresTableSource } from "@jsudc/server";
+import { sql } from "drizzle-orm";
+
+const registry = loadRegistry("./collections", (asset, reg) =>
+  asset.name === "message"
+    ? new PostgresTableSource({
+        db,
+        schema: asset.schema,
+        table: "inbox.message",
+        versionColumn: "row_version",
+        search: {
+          // websearch syntax: quoted phrases, `or`, a minus to exclude.
+          match: (q) => sql`tsv @@ websearch_to_tsquery('simple', ${q})`,
+          rank: (q) => sql`ts_rank(tsv, websearch_to_tsquery('simple', ${q}))`,
+        },
+      })
+    : makeSource(asset, { db, registry: reg, env: process.env }),
+);
+```
+
+```ts
+// A tenant's client: the best matches first, inside its own rows only.
+await client.list({ collection: "message", search: "invoice -draft", page: { limit: 50 } });
+// Roughly: SELECT … WHERE tenant_id = $1 AND (tsv @@ websearch_to_tsquery('simple', $2))
+// ORDER BY (ts_rank(tsv, websearch_to_tsquery('simple', $3))) DESC NULLS LAST, id ASC LIMIT 51 OFFSET 0
+```
+
+### An external index: `withSearchIndex`
+
+When the index lives outside the database (OpenSearch, Elasticsearch, a
+vector store), the host answers the text and jsudc does the rest.
+`withSearchIndex(source, { search })` wraps any source: the wrapper reports
+`search: "source"`, and a `list` with a `search` calls the host's
+`search(query)` for **one page of row ids in relevance order** (and a `total`
+when the index has one). jsudc then loads exactly those rows from the source
+— `id in ids` ANDed with the client's filter, under the row scope — and
+returns them in the index's order. An id the scope or the filter hides (or
+one deleted since it was indexed) is dropped, never fetched around: the page
+comes back shorter. `total` is the index's, `null` without one. A list
+without `search`, and every other method, is the wrapped source's own.
+
+The `query` the host receives (`SearchIndexQuery`): `text`, `page: { limit,
+offset }`, `ctx` (what the plugin's `context` hook answered), `collection`,
+`rowScope`, and the client's `filter` and `sort` when present. Pass the
+tenant to the index as well, so a page is not mostly rows jsudc will drop;
+jsudc applies the scope regardless.
+
+```ts
+import { Client } from "@opensearch-project/opensearch";
+import { loadRegistry, makeSource, withSearchIndex } from "@jsudc/server";
+
+const os = new Client({ node: process.env.OPENSEARCH_URL });
+
+const registry = loadRegistry("./collections", (asset, reg) => {
+  const source = makeSource(asset, { db, registry: reg, env: process.env });
+  if (asset.name !== "message" || !source) return source;
+  return withSearchIndex(source, {
+    async search({ text, page, ctx }) {
+      const res = await os.search({
+        index: "messages",
+        from: page.offset,
+        size: page.limit,
+        _source: false,
+        body: {
+          query: {
+            bool: {
+              must: { simple_query_string: { query: text, fields: ["subject^3", "body"] } },
+              filter: { term: { tenant_id: (ctx as { tenantId: string }).tenantId } },
+            },
+          },
+        },
+      });
+      return {
+        ids: res.body.hits.hits.map((h) => h._id),
+        total: res.body.hits.total.value,
+      };
+    },
+  });
+});
+```
+
+Loading by `id in ids` needs a filter on `id` to mean the row id, which holds
+for every built-in source unless its schema has a field named `id` of its own.
+The host's `sort` is advisory: the wrapper keeps the order of `ids`, so a host
+that wants a chosen sort to win orders its hits by it.
+
+**Not covered.** `mutate_many` by `filter` takes no search text: "all that
+match" a source search cannot be named in a bulk request yet, and
+`@jsudc/react` does not offer it while a source search is active. Highlights,
+facets and suggestions are not part of the protocol; no OpenSearch client
+ships with jsudc.
+
+## Host actions
+
+A host serves actions of its own next to the built-in ones. Define each once
+with `@jsudc/core`'s `defineHostAction` — name, request schema, response
+schema — in a module the server and the browser both import, and register it
+on the dispatcher: `dispatcher.register(action, handler)`. The handler's
+payload is the request schema's output, its return value is typed by the
+response schema, and it receives the request context (the plugin's
+`context`) as its second argument. The dispatcher validates the payload (a
+bad one is `validation_error`, the handler is not called), the plugin serves
+it at `POST /udc/<name>`, and the OpenAPI document shows it with its request
+and its response. A `UdcError` the handler throws is answered as it is;
+anything else is `internal` and logged. `register(name, schema, handler)`
+stays for an action without a shared definition.
+
+### Worked example: archive a thread
+
+```ts
+// shared/actions.ts — imported by the server and the browser
+import { defineHostAction } from "@jsudc/core";
+import { z } from "zod";
+
+export const archiveThread = defineHostAction({
+  name: "mail.archive_thread",
+  request: z.object({ thread: z.string().min(1) }),
+  response: z.object({ archived: z.number().int() }),
+});
+```
+
+```ts
+// server
+import { UdcError } from "@jsudc/core";
+import { buildApp, createDispatcher } from "@jsudc/server";
+import { archiveThread } from "../shared/actions.js";
+
+type Ctx = { tenant: string; user: string };
+
+const dispatcher = createDispatcher<Ctx>(registry, { log, rowScope });
+dispatcher.register(archiveThread, async ({ thread }, ctx: Ctx) => {
+  // The protocol itself, under the same context and scope: only the caller's rows.
+  const res = await dispatcher.dispatch(
+    {
+      kind: "udc.mutate_many",
+      id: "",
+      payload: {
+        collection: "message",
+        op: "update",
+        filter: { field: "thread", op: "eq", value: thread },
+        row: { archived: true },
+      },
+    },
+    ctx,
+  );
+  if (res.kind.endsWith(".err")) throw new UdcError("internal", "archive failed");
+  return { archived: (res.payload as { updated: number }).updated };
+});
+const app = await buildApp({ dispatcher, context: (req) => sessionOf(req) });
+```
+
+```ts
+// browser
+import { UdcClient } from "@jsudc/core";
+import { archiveThread } from "../shared/actions.js";
+
+const client = new UdcClient({ httpUrl: "" });
+const { archived } = await client.call(archiveThread, { thread: "t42" }); // typed
+```
+
+## Change feed
+
+A host tells jsudc when rows changed, and every connected client that may see
+those rows is told over one long-lived stream, so the UI refreshes without
+polling. A client is told only about rows inside its own scope, and never
+receives row data: an event is `{ collection, op, ids? }` (`ChangeEvent` of
+`@jsudc/core`), and the client refetches under its own scope, so a hidden
+scope field cannot leak through the feed.
+
+Configure it once and give it to the dispatcher:
+
+```ts
+import { buildApp, createChangeFeed, createDispatcher } from "@jsudc/server";
+
+const changes = createChangeFeed(); // one process; see "Several processes" below
+const dispatcher = createDispatcher<Ctx>(registry, { log, rowScope, changes });
+const app = await buildApp({ dispatcher, registry, context: (req) => sessionOf(req) });
+```
+
+With it, every collection reports `capabilities.changes: true` (`describe`,
+`collections`; `capabilities.subscribe` stays `false`, it promises udc-py's
+WebSocket actions), and the plugin serves `GET /udc/changes?collections=a,b`
+(under the plugin's `prefix`, next to your own routes) as Server-Sent Events.
+Without `changes` nothing differs from before: no route, no capability, no
+cost.
+
+The stream runs `context` once when it opens: a refusal is an HTTP 401
+(unauthenticated) or 403 with the error payload, not a stream. Every
+collection must be one the request may `list` (the `access` rule, asked with
+action `list`), else 404; its row scope is fixed for the life of the stream.
+Then it sends a `retry:` hint (`retryMs`, default 3 s), a `ready` event, a
+`change` event per change the request may see, and a heartbeat comment every
+`heartbeatMs` (default 15 s). The listener is removed when the client goes
+away, and `app.close()` ends every open stream. There is **no replay**: a
+change made while a client was disconnected is not sent later; the client
+refetches when it reconnects (`UdcClient.changes` reports `reconnected` for
+exactly that).
+
+### What jsudc notifies by itself
+
+After its own writes commit (when the source has answered), once per request,
+never for a request that failed:
+
+| Action          | Event                                                                                                                                               |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had) |
+| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                     |
+| `reindex`       | `update` without ids, tested on the request's `scope` and the row scope's pinned values                                                             |
+| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                           |
+
+Both Postgres sources hand the rows a `mutate_many` wrote to the feed
+(`SourceContext.changedRows`); a source of your own with a native
+`mutateMany` may do the same. One that does not still notifies, with the ids
+asked for and the row scope's pinned values.
+
+### `notify`: changes jsudc did not make
+
+After a write of your own, call `changes.notify(collection, { op?, ids?, ctx?, rows? })`:
+
+- **`ctx`**: the request context the rows belong to. The `eq` conditions of
+  `rowScope(ctx, collection)` are what the scope rule tests, so only streams
+  in that scope (and unscoped ones) are told.
+- **`rows`**: the changed rows' values (any fields a scope tests; a
+  `__meta.id` names the row). Each scope is told only the ids of its own rows;
+  when a row names no id, the event carries no ids at all (it could otherwise
+  name another scope's rows). Preferred over `ctx` when both are given.
+- **`op`** defaults to `update`; no `ids` means "this collection changed".
+
+On a collection that has a row scope, a `notify` with neither `ctx` nor
+`rows` **throws**: nothing is ever broadcast across scopes. Whether a
+collection has a scope is asked of your `rowScope` with no context: a filter,
+or a throw (it reads a context that is not there), means it has one.
+
+Worked example: a background job syncs a user's mailbox and inserts the new
+messages; that user's open tabs refresh, nobody else's.
+
+```ts
+import { createChangeFeed, createDispatcher } from "@jsudc/server";
+
+const changes = createChangeFeed();
+const dispatcher = createDispatcher<Ctx>(registry, {
+  log,
+  rowScope: (ctx, collection) =>
+    collection === "message" ? { field: "owner", op: "eq", value: ctx.user } : undefined,
+  changes,
+});
+
+async function syncMailbox(user: string): Promise<void> {
+  const inserted = await imap.fetchNew(user); // writes rows owned by `user`, outside jsudc
+  if (inserted.length === 0) return;
+  await changes.notify<Ctx>("message", {
+    op: "insert",
+    ids: inserted.map((m) => m.id),
+    ctx: { user }, // → { owner: user }: only this user's streams hear it
+  });
+}
+```
+
+### The scope rule, in plain words
+
+A stream is told about a change in a collection when it asked for that
+collection and either it has no row scope there, or its scope holds for at
+least one of the changed rows; it then receives only the ids of the rows its
+scope holds for. To test that, a change carries, on the server only, the
+values of the changed rows a scope can test (strings up to 256 characters,
+numbers, booleans, null, short arrays of those; row contents beyond that are
+never kept). A change whose rows are unknown reaches unscoped streams only.
+
+Burst control: past `coalesce.maxEvents` events (default 20) for one
+collection on one stream within `coalesce.windowMs` (default 250 ms), the
+rest are sent as one event without ids at the end of the window
+(`coalesce: false` turns it off). An event naming more than `maxIds` rows
+(default 500) is sent without ids.
+
+### Several processes: the Postgres bus, or your own
+
+The default bus is in-process: right for one server process. With several
+behind a load balancer, a change made through one must reach the streams of
+the others; give every process the same bus.
+
+```ts
+import { createChangeFeed, createPostgresChangeBus } from "@jsudc/server";
+
+const changes = createChangeFeed({
+  bus: createPostgresChangeBus({
+    connectionString: process.env.DATABASE_URL!,
+    pool: dbHandle.pool, // optional: NOTIFY through your pool
+    channel: "jsudc_changes", // the default; every process must agree
+  }),
+});
+```
+
+`PostgresChangeBus` keeps one dedicated connection per process that
+`LISTEN`s, and reopens it with backoff when it drops (`reconnectDelayMs`,
+`maxReconnectDelayMs`); notices sent while it is down are lost to that
+process (its clients refetch on reconnect). A change is delivered to the
+streams of its own process at once and sent to the others with `NOTIFY`; a
+payload over NOTIFY's size limit (8000 bytes) goes out without ids, meaning
+"this collection changed", split over several notifications when the values
+to test are large. `changes.close()` closes the bus.
+
+Anything else (Redis pub/sub, NATS) is a `ChangeBus` of your own:
+
+```ts
+import type { ChangeBus, ChangeNotice } from "@jsudc/server";
+
+function redisBus(pub: Redis, sub: Redis, channel = "jsudc_changes"): ChangeBus {
+  const listeners = new Set<(n: ChangeNotice) => void>();
+  void sub.subscribe(channel);
+  sub.on("message", (_ch, text) => {
+    for (const l of listeners) l(JSON.parse(text) as ChangeNotice);
+  });
+  return {
+    publish: async (notice) => void (await pub.publish(channel, JSON.stringify(notice))),
+    subscribe: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
+    close: async () => void (await sub.quit()),
+  };
+}
+```
+
+`publish` must reach every process, this one included (or deliver locally and
+skip its own echo, as the Postgres bus does); a `ChangeNotice` carries the
+values the scope rule tests, so keep the channel server-side.
+
+### What a proxy must allow
+
+The stream is one response that never ends. In front of it:
+
+- **No buffering.** nginx: `proxy_buffering off;` (the route also sends
+  `X-Accel-Buffering: no`), and no gzip on `text/event-stream`.
+- **Long timeouts.** The heartbeat writes every 15 s; a read timeout above
+  that keeps the connection open (nginx `proxy_read_timeout 1h;`, an AWS ALB
+  idle timeout above 15 s). HTTP/1.1 to the upstream
+  (`proxy_http_version 1.1; proxy_set_header Connection "";`).
+- Browsers allow about six HTTP/1.1 connections per origin: open one stream
+  for all the collections a page shows (`collections=a,b,c`), or serve over
+  HTTP/2.
+
 ## API
 
-| Export                                                                                                                             | What                                                                                     |
-| ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                        | the Fastify plugin, and a Fastify instance with it registered                            |
-| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                 | every action wired to a registry; `Dispatcher` to register actions of your own           |
-| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                      | read a collection directory; the served collections                                      |
-| `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for                                                        |
-| `PostgresJsonbSource`, `PostgresTableSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                | the six sources, usable directly                                                         |
-| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, … | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
-| `ArraySource`, `Source` and its request types                                                                                      | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
-| `OnMutateHook`, `OnMutateResult`, `RowChange`                                                                                      | the `onMutate` option of both Postgres sources (see above)                               |
-| `connect`, `Db`, `DbHandle`, `Executor`                                                                                            | a drizzle database over a `pg` pool                                                      |
-| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                           | the library's SQL                                                                        |
-| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                                | the tables, for drizzle and for plain SQL                                                |
-| `seedCollection`                                                                                                                   | schema revision 1 and the rows of a Postgres collection                                  |
-| `activeSchema`, `writeSchemaRevision`                                                                                              | the schema store under the schema edits                                                  |
-| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                               | what `describe` answers, for a custom action                                             |
-| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                          | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
-| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                  | the file preview route on its own                                                        |
-| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                           | the request context and the row scope (see above)                                        |
-| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`      | the generic row-scope layer, for a route of your own that reaches rows                   |
-| `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                     |
-| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                               |
+| Export                                                                                                                                       | What                                                                                     |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                                  | the Fastify plugin, and a Fastify instance with it registered                            |
+| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                           | every action wired to a registry; `Dispatcher` to register actions of your own           |
+| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                             | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap  |
+| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                                | read a collection directory; the served collections                                      |
+| `makeSource`, `SourceDeps`                                                                                                                   | the source `source.yaml` asks for                                                        |
+| `PostgresJsonbSource`, `PostgresTableSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                          | the six sources, usable directly                                                         |
+| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, …           | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
+| `ArraySource`, `Source` and its request types                                                                                                | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
+| `OnMutateHook`, `OnMutateResult`, `RowChange`                                                                                                | the `onMutate` option of both Postgres sources (see above)                               |
+| `connect`, `Db`, `DbHandle`, `Executor`                                                                                                      | a drizzle database over a `pg` pool                                                      |
+| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                                     | the library's SQL                                                                        |
+| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                                          | the tables, for drizzle and for plain SQL                                                |
+| `seedCollection`                                                                                                                             | schema revision 1 and the rows of a Postgres collection                                  |
+| `activeSchema`, `writeSchemaRevision`                                                                                                        | the schema store under the schema edits                                                  |
+| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                                         | what `describe` answers, for a custom action                                             |
+| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                                    | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
+| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                            | the file preview route on its own                                                        |
+| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                                     | the request context and the row scope (see above)                                        |
+| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`                | the generic row-scope layer, for a route of your own that reaches rows                   |
+| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`, `PostgresTableSearch`                                      | the search box answered by the source (see above)                                        |
+| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                                   | the same pieces, for a source of your own that answers `search`                          |
+| `createChangeFeed`, `ChangeFeed`, `ChangeFeedOptions`, `NotifyOptions`, `ChangeCoalesceOptions`                                              | the change feed and `notify` (see [Change feed](#change-feed))                           |
+| `ChangeBus`, `ChangeNotice`, `ChangeMatch`, `ChangeListener`, `MemoryChangeBus`                                                              | the bus between server processes, and the in-process one                                 |
+| `createPostgresChangeBus`, `PostgresChangeBus`, `PostgresChangeBusOptions`, `encodeNotice`, `DEFAULT_CHANGE_CHANNEL`, `NOTIFY_PAYLOAD_LIMIT` | the `LISTEN` / `NOTIFY` bus                                                              |
+| `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`                       | the stream route on its own, and the scope rule's pieces                                 |
+| `BlobRouteOptions`                                                                                                                           | `registerBlobRoute(app, registry, {context, scope})`                                     |
+| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                                     | the pieces the http_api and filesystem sources are made of                               |
 
 ## Develop
 

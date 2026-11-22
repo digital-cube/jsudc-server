@@ -2,8 +2,13 @@ import {
   ACTIONS,
   type CollectionsResponse,
   errKind,
+  type HostAction,
+  type HostActionReply,
+  type HostActionRequest,
+  isHostAction,
   isUdcError,
   type ListResponse,
+  type MutateManyResponse,
   okKind,
   parseKind,
   type ReadResponse,
@@ -12,9 +17,11 @@ import {
   type UdcMessage,
 } from "@jsudc/core";
 import type { z } from "zod";
+import type { ChangeFeed } from "./changes.js";
 import { assertLookupTarget } from "./links.js";
 import type { CollectionRegistry } from "./registry.js";
 import { openCollection, type RowScopeOptions, ScopedCollection } from "./scope.js";
+import { DEFAULT_MUTATE_MANY_LIMIT } from "./sources/bulk.js";
 import type { Source } from "./sources/source.js";
 
 export interface DispatchLogger {
@@ -28,14 +35,40 @@ export interface DispatchLogger {
  */
 type Handler<S extends z.ZodType, Ctx> = (payload: z.output<S>, ctx: Ctx) => unknown;
 
+/**
+ * The handler of a host action (`defineHostAction` of `@jsudc/core`): the
+ * payload as its request schema outputs it, the request context, and what
+ * it answers typed by its response schema.
+ */
+export type HostActionHandler<A extends HostAction, Ctx = unknown> = (
+  payload: HostActionRequest<A>,
+  ctx: Ctx,
+) => HostActionReply<A> | Promise<HostActionReply<A>>;
+
 interface Registered {
   schema: z.ZodType;
+  /** The answer's schema, when the action was registered with one (a host action): documented, not enforced. */
+  response?: z.ZodType | undefined;
   handle: (payload: unknown, ctx: unknown) => unknown;
 }
 
 /** What a `Dispatcher` is built with: the logger, and the host's row scope and access hooks. */
 export interface DispatcherOptions<Ctx = unknown> extends RowScopeOptions<Ctx> {
   log: DispatchLogger;
+  /**
+   * The most rows one `mutate_many` request may touch (by `ids`, or by
+   * `filter` minus `except_ids`); more is a `validation_error` with
+   * `details.reason: "too_many_rows"`, before anything is written. Default
+   * 10 000 (`DEFAULT_MUTATE_MANY_LIMIT`).
+   */
+  mutateManyLimit?: number | undefined;
+  /**
+   * The change feed (`createChangeFeed`): every collection then reports
+   * `capabilities.changes`, `mutate`, `mutate_many`, `reindex` and
+   * `tree.reparent` notify it after they commit, and `udcPlugin` serves the
+   * stream at `GET /udc/changes`. Without it nothing changes.
+   */
+  changes?: ChangeFeed | undefined;
 }
 
 /**
@@ -48,6 +81,8 @@ export class Dispatcher {
   private readonly log: DispatchLogger;
   /** The host's `rowScope`, `access` and `showScopeFields`, for the routes that reach rows outside `dispatch`. */
   readonly scopeOptions: RowScopeOptions;
+  /** The change feed this dispatcher's writes notify and the plugin streams; `undefined` without one. */
+  readonly changes: ChangeFeed | undefined;
 
   constructor(opts: DispatcherOptions) {
     this.log = opts.log;
@@ -57,16 +92,39 @@ export class Dispatcher {
       ...(opts.access ? { access: opts.access.bind(opts) } : {}),
       ...(opts.showScopeFields ? { showScopeFields: opts.showScopeFields } : {}),
     };
+    this.changes = opts.changes;
+    this.changes?.attach(this.scopeOptions, this.log);
   }
 
+  /** An action by name with the Zod schema of its payload. */
   register<S extends z.ZodType, Ctx = unknown>(
     action: string,
     schema: S,
     handle: Handler<S, Ctx>,
+  ): this;
+  /**
+   * A host action defined once with `defineHostAction`: validated with its
+   * request schema, the handler typed from it (and given the request
+   * context), its response schema in the OpenAPI document.
+   */
+  register<A extends HostAction, Ctx = unknown>(action: A, handle: HostActionHandler<A, Ctx>): this;
+  register(
+    action: string | HostAction,
+    schemaOrHandle: z.ZodType | ((payload: never, ctx: never) => unknown),
+    maybeHandle?: (payload: never, ctx: never) => unknown,
   ): this {
+    if (typeof action !== "string") {
+      if (!isHostAction(action)) throw new Error("Dispatcher.register: not a host action");
+      this.handlers.set(action.name, {
+        schema: action.request,
+        response: action.response,
+        handle: schemaOrHandle as (payload: unknown, ctx: unknown) => unknown,
+      });
+      return this;
+    }
     this.handlers.set(action, {
-      schema,
-      handle: handle as (payload: unknown, ctx: unknown) => unknown,
+      schema: schemaOrHandle as z.ZodType,
+      handle: maybeHandle as (payload: unknown, ctx: unknown) => unknown,
     });
     return this;
   }
@@ -77,6 +135,11 @@ export class Dispatcher {
 
   actions(): string[] {
     return [...this.handlers.keys()];
+  }
+
+  /** The answer schema of a registered host action (the OpenAPI document); `undefined` for any other. */
+  responseOf(action: string): z.ZodType | undefined {
+    return this.handlers.get(action)?.response;
   }
 
   /** The payload schema of a registered action (used for the OpenAPI document). */
@@ -159,6 +222,19 @@ function reparentable(s: ScopedCollection): ScopedCollection {
   return s;
 }
 
+/** The collection, when it changes many rows at once (`capabilities.mutate_many`), or `unsupported_op`. */
+function bulkMutable(s: ScopedCollection): ScopedCollection {
+  if (!s.capabilities().mutate_many) {
+    const name = s.collection.name;
+    throw new UdcError(
+      "unsupported_op",
+      `collection ${name} does not support mutate_many (mutate_many: false)`,
+      { collection: name },
+    );
+  }
+  return s;
+}
+
 /** The source of a collection read from a file the UI may show, or `unsupported_op`. */
 function sourceReadable(s: ScopedCollection): Source & Required<Pick<Source, "readSource">> {
   s.assertTenantWide("source.read");
@@ -186,8 +262,15 @@ export function createDispatcher<Ctx = unknown>(
 ): Dispatcher {
   const dispatcher = new Dispatcher(opts as DispatcherOptions);
   const scoping = dispatcher.scopeOptions;
+  const bulkLimit = opts.mutateManyLimit ?? DEFAULT_MUTATE_MANY_LIMIT;
+  if (!Number.isInteger(bulkLimit) || bulkLimit < 1) {
+    throw new Error(
+      `createDispatcher: mutateManyLimit must be a positive integer, not ${bulkLimit}`,
+    );
+  }
+  const feed = dispatcher.changes;
   const open = (action: string, collection: string, ctx: unknown) =>
-    openCollection(registry, scoping, action, collection, ctx);
+    openCollection(registry, scoping, action, collection, ctx, feed);
   return dispatcher
     .register("collections", ACTIONS.collections.request, (_, ctx): CollectionsResponse => {
       const collections = registry
@@ -195,7 +278,7 @@ export function createDispatcher<Ctx = unknown>(
         .filter(
           (c) => scoping.access?.(ctx, { action: "collections", collection: c.name }) !== false,
         )
-        .map((c) => new ScopedCollection(c, ctx, scoping));
+        .map((c) => new ScopedCollection(c, ctx, scoping, feed));
       return {
         collections: collections.map((s) => ({
           name: s.collection.name,
@@ -213,12 +296,13 @@ export function createDispatcher<Ctx = unknown>(
     .register(
       "list",
       ACTIONS.list.request,
-      ({ collection, filter, sort, page }, ctx): Promise<ListResponse> => {
+      ({ collection, filter, sort, page, search }, ctx): Promise<ListResponse> => {
         const s = open("list", collection, ctx);
         return s.list({
           filter,
           sort,
           page: { ...page, limit: page?.limit ?? s.collection.view.page_size_default },
+          ...(search === undefined ? {} : { search }),
         });
       },
     )
@@ -274,5 +358,11 @@ export function createDispatcher<Ctx = unknown>(
     .register("source.read", ACTIONS["source.read"].request, ({ collection }, ctx) => {
       const s = open("source.read", collection, ctx);
       return sourceReadable(s).readSource(s.sctx);
-    });
+    })
+    .register(
+      "mutate_many",
+      ACTIONS.mutate_many.request,
+      ({ collection, ...req }, ctx): Promise<MutateManyResponse> =>
+        bulkMutable(open("mutate_many", collection, ctx)).mutateMany({ ...req, limit: bulkLimit }),
+    );
 }

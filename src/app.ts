@@ -14,6 +14,7 @@ import Fastify, {
 } from "fastify";
 import { z } from "zod";
 import { registerBlobRoute } from "./blob.js";
+import { registerChangesRoute } from "./changes-route.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { checkRegistryLinks } from "./links.js";
 import type { CollectionRegistry } from "./registry.js";
@@ -25,8 +26,8 @@ function messageId(header: string | string[] | undefined): string {
 }
 
 /** The documented response of one action: its ok payload or the error payload, always HTTP 200. */
-function envelopeDoc(action: string) {
-  const ok = isActionName(action) ? ACTIONS[action].response : z.unknown();
+function envelopeDoc(action: string, response: z.ZodType | undefined) {
+  const ok = response ?? (isActionName(action) ? ACTIONS[action].response : z.unknown());
   return z
     .object({
       kind: z.string().describe(`udc.${action}.ok | udc.${action}.err`),
@@ -50,7 +51,9 @@ export interface UdcPluginOptions {
   /**
    * With it, `GET /udc/files/blob` serves file previews of filesystem
    * collections, and the plugin checks every lookup and `row_link` against
-   * the active schemas before it serves (`checkRegistryLinks`).
+   * the active schemas before it serves (`checkRegistryLinks`). Required
+   * when the dispatcher has a change feed (`changes`): the plugin then serves
+   * `GET /udc/changes` (Server-Sent Events) as well.
    */
   registry?: CollectionRegistry | undefined;
   /** `false` skips that check (a registry whose database is not there yet). Default `true`. */
@@ -182,6 +185,15 @@ export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): P
       scope: dispatcher.scopeOptions,
     });
   }
+  if (dispatcher.changes) {
+    if (!opts.registry) {
+      throw new Error("udcPlugin: a dispatcher with a change feed needs the registry option");
+    }
+    registerChangesRoute(app, opts.registry, dispatcher.changes, {
+      context: opts.context?.bind(opts),
+      scope: dispatcher.scopeOptions,
+    });
+  }
 
   for (const action of dispatcher.actions()) {
     app.post(
@@ -192,7 +204,7 @@ export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): P
           operationId: action,
           body: dispatcher.schemaOf(action),
           headers: z.object({ [MESSAGE_ID_HEADER]: z.string().optional() }),
-          response: { 200: envelopeDoc(action) },
+          response: { 200: envelopeDoc(action, dispatcher.responseOf(action)) },
         },
       },
       (request) => handle(action, request),

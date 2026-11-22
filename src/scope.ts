@@ -6,20 +6,28 @@ import {
   type FilterNode,
   isCondition,
   isRowIdField,
+  isUdcError,
   type ListResponse,
+  MAX_PAGE_LIMIT,
+  type MutateManyFailure,
   ROW_ID,
   type Row,
   type SchemaDoc,
   type SortKey,
   UdcError,
 } from "@jsudc/core";
+import type { ChangeFeed } from "./changes.js";
 import { buildDescribe } from "./describe.js";
 import type { Collection, CollectionRegistry } from "./registry.js";
+import { notFoundFailure, tooManyRows } from "./sources/bulk.js";
 import { assertValidRow, filterFields, notFound, withoutMeta } from "./sources/fields.js";
+import { assertSearchable, searchText } from "./sources/search.js";
 import type {
+  MutateManyResult,
   Source,
   SourceContext,
   SourceListRequest,
+  SourceMutateMany,
   SourceMutation,
   SourceReindex,
   SourceTreeReparent,
@@ -188,13 +196,16 @@ export class ScopedCollection {
   readonly sctx: SourceContext;
   /** The scope fields this request does not see. */
   readonly hidden: ReadonlySet<string>;
+  /** The change feed jsudc's own writes notify (the dispatcher's `changes`); `undefined` without one. */
+  readonly feed: ChangeFeed | undefined;
   private readonly ctx: unknown;
   private readonly options: RowScopeOptions;
 
-  constructor(collection: Collection, ctx: unknown, options: RowScopeOptions) {
+  constructor(collection: Collection, ctx: unknown, options: RowScopeOptions, feed?: ChangeFeed) {
     this.collection = collection;
     this.ctx = ctx;
     this.options = options;
+    this.feed = feed;
     this.rowScope = options.rowScope?.(ctx, collection.name) ?? undefined;
     this.sctx = this.rowScope
       ? { ctx, collection: collection.name, rowScope: this.rowScope }
@@ -224,7 +235,11 @@ export class ScopedCollection {
    * (respectively `source.read`).
    */
   capabilities(): Capabilities {
-    const caps = this.source.capabilities;
+    const own = this.source.capabilities;
+    // `mutate_many` wherever `mutate` is (natively, or by the generic layer) unless the source says no.
+    const caps: Capabilities = { ...own, mutate_many: own.mutate_many ?? own.mutate };
+    // The feed is the server's, not the source's: every collection pushes once one is configured.
+    if (this.feed) caps.changes = true;
     if (!this.rowScope) return caps;
     return {
       ...caps,
@@ -266,7 +281,16 @@ export class ScopedCollection {
     return describeWithout(filterable, this.hidden);
   }
 
-  async list(req: SourceListRequest): Promise<ListResponse> {
+  /**
+   * A `list` under the row scope. A `search` reaches only a source that
+   * answers it (`capabilities.search: "source"`, else `unsupported_op`),
+   * trimmed, and is ANDed with the scope and the filter like any condition.
+   */
+  async list(listReq: SourceListRequest): Promise<ListResponse> {
+    const { search, ...rest } = listReq;
+    assertSearchable(this.source.capabilities, this.collection.name, search);
+    const text = searchText(search);
+    const req: SourceListRequest = text === undefined ? rest : { ...rest, search: text };
     if (!this.rowScope) return this.source.list(req, this.sctx);
     this.refuseHidden(req.filter, req.sort);
     const filter = this.native ? req.filter : andFilters(this.rowScope, req.filter);
@@ -281,7 +305,27 @@ export class ScopedCollection {
     return this.strip(await this.readInScope(id));
   }
 
+  /**
+   * A `mutate` under the row scope. With a change feed, the written row (an
+   * update's row as it was, too) is notified once the source answered, so
+   * after its commit; a failed write notifies nothing.
+   */
   async mutate(m: SourceMutation): Promise<Row> {
+    const feed = this.feed;
+    if (!feed) return this.mutateInScope(m);
+    // The row as it was, so a stream that saw it before an update moved it away is told too.
+    const before =
+      m.op === "update" && m.id !== undefined
+        ? await this.source.read(m.id, this.sctx).catch(() => null)
+        : null;
+    const written = await this.mutateInScope(m, true);
+    await feed.written(this.collection.name, m.op, before ? [before, written] : [written]);
+    return this.strip(written);
+  }
+
+  /** `mutate` itself; `raw` answers the source's row, scope fields included. */
+  private async mutateInScope(m: SourceMutation, raw = false): Promise<Row> {
+    const done = (row: Row) => (raw ? row : this.strip(row));
     if (!this.rowScope) return this.source.mutate(m, this.sctx);
     const scope = this.rowScope;
     const given = withoutMeta(m.row ?? {});
@@ -309,10 +353,173 @@ export class ScopedCollection {
     } else if (!this.native && m.id !== undefined) {
       await this.readInScope(m.id);
     }
-    return this.strip(await this.source.mutate(op, this.sctx));
+    return done(await this.source.mutate(op, this.sctx));
   }
 
+  /**
+   * `mutate_many` under this request's scope. Hidden scope fields are refused
+   * in the patch and the filter, the scope's pins are written over the patch,
+   * and `ids` beyond `limit` are refused. A source with a native `mutateMany`
+   * that applies the scope itself does the rest in one transaction; any other
+   * goes through `mutateManyGeneric`.
+   */
+  async mutateMany(req: SourceMutateMany): Promise<MutateManyResult> {
+    const ids = req.ids === undefined ? undefined : [...new Set(req.ids)];
+    if (ids && ids.length > req.limit) throw tooManyRows(this.collection.name, req.limit, "ids");
+    this.refuseHidden(req.filter, undefined);
+    let row: Record<string, unknown> | undefined;
+    if (req.op === "update") {
+      const given = withoutMeta(req.row ?? {});
+      if (Object.keys(given).some((f) => this.hidden.has(f))) {
+        const visible = withoutFields(await this.schema(), this.hidden);
+        assertValidRow(visible, given, "patch");
+      }
+      row = { ...given };
+      for (const [field, value] of Object.entries(rowScopePins(this.rowScope))) {
+        if (Object.hasOwn(row, field)) row[field] = value;
+      }
+    }
+    const op: SourceMutateMany = {
+      op: req.op,
+      limit: req.limit,
+      ...(ids === undefined ? {} : { ids }),
+      ...(req.filter === undefined ? {} : { filter: req.filter }),
+      ...(req.except_ids === undefined ? {} : { except_ids: req.except_ids }),
+      ...(row === undefined ? {} : { row }),
+    };
+    const { source } = this;
+    const feed = this.feed;
+    if (source.mutateMany && (!this.rowScope || this.native)) {
+      if (!feed) return source.mutateMany(op, this.sctx);
+      // The source hands over the rows it wrote, when it can (both Postgres sources do).
+      let seen: Row[] | undefined;
+      const sctx: SourceContext = {
+        ...this.sctx,
+        changedRows: (rows) => {
+          seen ??= [];
+          seen.push(...rows);
+        },
+      };
+      const res = await source.mutateMany(op, sctx);
+      if (res.updated > 0) {
+        if (seen) await feed.written(this.collection.name, req.op, seen);
+        else {
+          // A source that does not say which rows: the ids asked for, and the values every row
+          // in this scope holds (its pinned fields).
+          const failed = new Set(res.failed.map((f) => f.id));
+          await feed.written(this.collection.name, req.op, [], {
+            ids: ids ? ids.filter((id) => !failed.has(id)) : false,
+            match: [{ values: rowScopePins(this.rowScope) }],
+          });
+        }
+      }
+      return res;
+    }
+    const seen: Row[] = [];
+    const res = await this.mutateManyGeneric(op, seen);
+    if (feed && res.updated > 0) await feed.written(this.collection.name, req.op, seen);
+    return res;
+  }
+
+  /**
+   * `mutate_many` for a source without a native one (memory, a host's own):
+   * validate the patch, read the rows in scope (by id, or by paging the
+   * filter), refuse the request when a patch would take one of them out of
+   * the scope or the filter reaches more than `limit`, then `mutate` each.
+   * Everything that can be refused is refused before the first write; there
+   * is no transaction, so a source failing midway leaves the rows before it
+   * changed.
+   */
+  private async mutateManyGeneric(req: SourceMutateMany, seen: Row[]): Promise<MutateManyResult> {
+    const schema = await this.schema();
+    const patch = req.row ?? {};
+    if (req.op === "update") assertValidRow(schema, patch, "patch");
+    const failed: MutateManyFailure[] = [];
+    let targets: Row[];
+    if (req.ids) {
+      targets = [];
+      for (const id of req.ids) {
+        try {
+          targets.push(await this.readInScope(id));
+        } catch (err) {
+          if (!isUdcError(err) || err.code !== "not_found") throw err;
+          failed.push(notFoundFailure(id));
+        }
+      }
+    } else {
+      targets = await this.allMatching(req.filter, new Set(req.except_ids ?? []), req.limit);
+    }
+    if (req.op === "update" && this.rowScope) {
+      for (const row of targets) {
+        if (!(await this.inScope({ ...row, ...patch }))) throw outOfScope(this.collection.name);
+      }
+    }
+    let updated = 0;
+    for (const row of targets) {
+      const id = row.__meta.id;
+      try {
+        const written = await this.source.mutate(
+          req.op === "update" ? { op: "update", id, row: patch } : { op: "delete", id },
+          this.sctx,
+        );
+        updated += 1;
+        seen.push(row);
+        if (req.op === "update") seen.push(written);
+      } catch (err) {
+        // Gone since it was read: reported like an id that was never there.
+        if (!isUdcError(err) || err.code !== "not_found") throw err;
+        if (req.ids) failed.push(notFoundFailure(id));
+      }
+    }
+    return { updated, failed };
+  }
+
+  /** Every row in scope that `filter` matches, minus `except`; more than `limit` is refused. */
+  private async allMatching(
+    filter: FilterNode | undefined,
+    except: ReadonlySet<string>,
+    limit: number,
+  ): Promise<Row[]> {
+    const where = this.native ? filter : andFilters(this.rowScope, filter);
+    const byCursor = this.source.capabilities.paging?.includes("offset") === false;
+    const out: Row[] = [];
+    let offset = 0;
+    let cursor: string | null = null;
+    for (;;) {
+      const page = byCursor
+        ? { limit: MAX_PAGE_LIMIT, ...(cursor === null ? {} : { cursor }) }
+        : { limit: MAX_PAGE_LIMIT, offset };
+      const res = await this.source.list({ filter: where, page }, this.sctx);
+      const rows = this.native ? res.rows : await this.onlyInScope(res.rows);
+      for (const row of rows) {
+        if (except.has(row.__meta.id)) continue;
+        out.push(row);
+        if (out.length > limit) throw tooManyRows(this.collection.name, limit, "filter");
+      }
+      offset += res.rows.length;
+      cursor = res.next_cursor;
+      const more = byCursor ? cursor !== null : res.rows.length === MAX_PAGE_LIMIT;
+      if (!more || res.rows.length === 0) return out;
+    }
+  }
+
+  /**
+   * A `reindex` under the row scope. With a change feed, a renumbering that
+   * touched rows is notified without ids, for the values every renumbered row
+   * holds: the request's `scope` and the row scope's pinned fields.
+   */
   async reindex(req: SourceReindex): Promise<number> {
+    const updated = await this.reindexInScope(req);
+    if (this.feed && updated > 0) {
+      await this.feed.written(this.collection.name, "update", [], {
+        ids: false,
+        match: [{ values: { ...rowScopePins(this.rowScope), ...req.scope } }],
+      });
+    }
+    return updated;
+  }
+
+  private async reindexInScope(req: SourceReindex): Promise<number> {
     const source = this.source as Source & Required<Pick<Source, "reindex">>;
     if (!this.rowScope) return source.reindex(req, this.sctx);
     for (const field of Object.keys(req.scope)) {
@@ -336,9 +543,27 @@ export class ScopedCollection {
     return source.reindex({ ...req, scope }, this.sctx);
   }
 
+  /**
+   * A `tree.reparent` under the row scope. With a change feed, the move is
+   * notified without ids (the subtree and both parents changed too), for the
+   * values of the moved node.
+   */
   async reparent(req: SourceTreeReparent): Promise<TreeReparentResult> {
+    const res = await this.reparentInScope(req);
+    if (this.feed) {
+      await this.feed.written(this.collection.name, "update", [res.raw], { ids: false });
+    }
+    return res.result;
+  }
+
+  private async reparentInScope(
+    req: SourceTreeReparent,
+  ): Promise<{ result: TreeReparentResult; raw: Row }> {
     const source = this.source as Source & Required<Pick<Source, "reparent">>;
-    if (!this.rowScope) return source.reparent(req, this.sctx);
+    if (!this.rowScope) {
+      const res = await source.reparent(req, this.sctx);
+      return { result: res, raw: res.row };
+    }
     for (const field of Object.values(req.fields)) {
       if (typeof field === "string" && this.hidden.has(field)) {
         throw unknownField(field, "tree.reparent fields");
@@ -349,7 +574,7 @@ export class ScopedCollection {
       if (req.parent !== null) await this.readInScope(req.parent);
     }
     const res = await source.reparent(req, this.sctx);
-    return { ...res, row: this.strip(res.row) };
+    return { result: { ...res, row: this.strip(res.row) }, raw: res.row };
   }
 
   /** The row, or exactly the `not_found` of a missing id when it is outside the scope. */
@@ -411,10 +636,11 @@ export function openCollection(
   action: string,
   name: string,
   ctx: unknown,
+  feed?: ChangeFeed,
 ): ScopedCollection {
   const collection = registry.get(name);
   if (options.access?.(ctx, { action, collection: collection.name }) === false) {
     throw new UdcError("not_found", `unknown collection: ${name}`, { collection: name });
   }
-  return new ScopedCollection(collection, ctx, options);
+  return new ScopedCollection(collection, ctx, options, feed);
 }

@@ -11,16 +11,20 @@ import {
 import { type SQL, sql } from "drizzle-orm";
 import type { Db, Executor } from "../db/client.js";
 import { rowScopePins, withoutFields } from "../scope.js";
+import { idArray, missing, tooManyRows } from "./bulk.js";
 import { type CursorValue, decodeCursor, encodeCursor, isIdOfType } from "./cursor.js";
 import { assertQueryFields, notFound, versionConflict, withoutMeta } from "./fields.js";
 import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
+import { assertSearchable, encodeSearchCursor, searchPage, searchText } from "./search.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_PAGE_SIZE,
+  type MutateManyResult,
   type Source,
   type SourceAddField,
   type SourceContext,
   type SourceListRequest,
+  type SourceMutateMany,
   type SourceMutation,
   type SourceUpdateField,
 } from "./source.js";
@@ -99,6 +103,23 @@ export interface TableFieldSpec {
   array?: SqlArrayForm | undefined;
 }
 
+/**
+ * How a `postgres_table` source matches the search box in SQL, written by
+ * the host in code. `q` is the search text as a bound parameter (never
+ * spliced into the statement); `text` is the same text, for a host that
+ * builds its own parameter from it (a prefix pattern, for instance).
+ */
+export interface PostgresTableSearch {
+  /** A condition true for a row that matches: `` sql`m.tsv @@ websearch_to_tsquery('simple', ${q})` ``. */
+  match(q: SQL, text: string): SQL;
+  /**
+   * The relevance of a row, higher first: `` sql`ts_rank(m.tsv, websearch_to_tsquery('simple', ${q}))` ``.
+   * With it, a search without a `sort` comes by rank (ties by id), paged by
+   * offset. Without it, a search is ordered like any list.
+   */
+  rank?(q: SQL, text: string): SQL;
+}
+
 export interface PostgresTableSourceOptions {
   db: Db;
   /** The collection's `schema.json`; there are no revisions. */
@@ -141,6 +162,14 @@ export interface PostgresTableSourceOptions {
   onMutate?(ctx: unknown, change: RowChange, tx: Executor): OnMutateResult;
   /** A condition (SQL, from code) ANDed into every statement. */
   where?: SQL | string | undefined;
+  /**
+   * The search box answered by this source (`capabilities.search: "source"`):
+   * the text of a `list` with `search` is matched by `search.match`, ANDed
+   * with the base `where`, the row scope and the client's filter, and ranked
+   * by `search.rank` when there is no `sort`. Without it, the client composes
+   * `contains` as before.
+   */
+  search?: PostgresTableSearch | undefined;
   /** `false`: no `count(*)` next to the page; `total` is `null`. Default `true`. */
   totalCount?: boolean | undefined;
   /** `true`: a NULL column is served as `null`; by default it is left out of the row. */
@@ -233,6 +262,7 @@ export class PostgresTableSource implements Source {
   /** The schema an insert or patch is validated against: the read-only fields are not in it. */
   private readonly writeSchema: SchemaDoc;
   private readonly onMutate: PostgresTableSourceOptions["onMutate"];
+  private readonly search: PostgresTableSearch | undefined;
 
   constructor(opts: PostgresTableSourceOptions) {
     if ((opts.table === undefined) === (opts.from === undefined)) {
@@ -290,6 +320,7 @@ export class PostgresTableSource implements Source {
     this.notFilterable = notFilterable;
     this.computedFields = computed;
     this.onMutate = opts.onMutate;
+    this.search = opts.search;
     this.writes = opts.readOnly ? null : writePlan(opts, schema, columnOf, readOnly, arrayForms);
     this.readOnlyFields = readOnly;
     this.writeSchema = withoutFields(schema, new Set(readOnly));
@@ -303,6 +334,7 @@ export class PostgresTableSource implements Source {
     });
     this.capabilities = {
       mutate: this.writes !== null,
+      mutate_many: this.writes !== null,
       subscribe: false,
       total_count: this.totalCount,
       schema_edit: false,
@@ -311,6 +343,7 @@ export class PostgresTableSource implements Source {
       tree_reparent: false,
       source_yaml: false,
       paging: ["cursor", "offset"],
+      ...(this.search ? { search: "source" as const } : {}),
       supported_filter_ops: ALL_FILTER_OPS,
     };
   }
@@ -324,12 +357,21 @@ export class PostgresTableSource implements Source {
     assertQueryFields(this.filterSchema, req.filter, undefined);
     assertQueryFields(this.sortSchema, undefined, req.sort);
     const r = this.resolver;
+    const text = searchText(req.search);
+    if (text !== undefined && !this.search) {
+      assertSearchable(this.capabilities, this.label, text);
+    }
+    const q = sql`${text}`;
+    const match = text !== undefined && this.search ? this.search.match(q, text) : sql`TRUE`;
     // The client filter against what a client may filter by; the host's row scope against the whole schema.
     const where = sql`${this.baseWhere} AND ${this.scopeSql(sctx)} AND ${compileFilter(
       req.filter,
       this.filterSchema,
       r,
-    )}`;
+    )} AND (${match})`;
+    if (text !== undefined && this.search?.rank && !req.sort?.length) {
+      return this.listByRank(where, this.search.rank(q, text), req);
+    }
     const terms = compileSort(req.sort, this.sortSchema, r);
     const limit = req.page?.limit ?? this.pageSizeDefault;
     const cursor = req.page?.cursor;
@@ -365,6 +407,29 @@ export class PostgresTableSource implements Source {
         : null;
     const total = count ? (count.rows[0]?.total ?? 0) : null;
     return { rows: page.map((row) => this.serialize(row)), next_cursor, total };
+  }
+
+  /** One page of a search in relevance order (ties by id), by offset or the cursor of the previous page. */
+  private async listByRank(where: SQL, rank: SQL, req: SourceListRequest): Promise<ListResponse> {
+    const { limit, offset } = searchPage(req, this.pageSizeDefault);
+    const rowsQuery = this.db.execute<TableRow>(sql`
+      SELECT ${this.columns()}
+      FROM ${this.from}
+      WHERE ${where}
+      ORDER BY (${rank}) DESC NULLS LAST, ${this.resolver.id} ASC
+      LIMIT ${limit + 1} OFFSET ${offset}`);
+    const countQuery = this.totalCount
+      ? this.db.execute<{ total: number }>(
+          sql`SELECT count(*)::int AS total FROM ${this.from} WHERE ${where}`,
+        )
+      : null;
+    const [rows, count] = await Promise.all([rowsQuery, countQuery]);
+    const page = rows.rows.slice(0, limit);
+    return {
+      rows: page.map((row) => this.serialize(row)),
+      next_cursor: rows.rows.length > limit ? encodeSearchCursor(offset + limit) : null,
+      total: count ? (count.rows[0]?.total ?? 0) : null,
+    };
   }
 
   async read(id: string, sctx?: SourceContext): Promise<Row> {
@@ -456,6 +521,148 @@ export class PostgresTableSource implements Source {
       }
       const after = await this.readBack(tx, id, sctx);
       return this.finish(tx, sctx, { op: "update", id, before, after, patch: patch ?? {} });
+    });
+  }
+
+  /**
+   * `mutate_many` in one transaction. The patch (read-only fields refused, as
+   * in `mutate`) and the filter are checked first. The target rows — the ids,
+   * or the filter minus `except_ids`, inside the base `where` and the row
+   * scope, at most `limit + 1` so a filter reaching more is refused before
+   * anything is written — are locked in the write table in id order and
+   * checked in scope again. Without `onMutate` one `UPDATE` / `DELETE` of the
+   * write table writes them all, the version column bumped, and the rows are
+   * read back through the `from` to check they are still in scope. With it,
+   * row by row, the hook called for each; a hook failure, like a row leaving
+   * the scope, rolls the whole request back.
+   */
+  async mutateMany(req: SourceMutateMany, sctx?: SourceContext): Promise<MutateManyResult> {
+    const w = this.writes;
+    if (!w) throw this.readOnly("mutate_many");
+    const pins = rowScopePins(sctx?.rowScope);
+    const patch =
+      req.op === "update"
+        ? this.writable(pinned(withoutMeta(req.row ?? {}), pins), pins, "patch")
+        : null;
+    assertQueryFields(this.filterSchema, req.filter, undefined);
+    const r = this.resolver;
+    const inScope = sql`${this.baseWhere} AND ${this.scopeSql(sctx)}`;
+    const requested = req.ids ?? [];
+    let target: SQL;
+    if (req.ids) {
+      const ids = req.ids.filter((id) => isIdOfType(id, r.idType));
+      if (ids.length === 0) return { updated: 0, failed: missing(requested, new Set()) };
+      target = sql`${r.id} = ANY(${idArray(ids, r.idType)})`;
+    } else {
+      const except = (req.except_ids ?? []).filter((id) => isIdOfType(id, r.idType));
+      const filter = compileFilter(req.filter, this.filterSchema, r);
+      target =
+        except.length === 0
+          ? filter
+          : sql`${filter} AND NOT (${r.id} = ANY(${idArray(except, r.idType)}))`;
+    }
+    const collection = sctx?.collection ?? this.label;
+
+    return this.db.transaction(async (tx) => {
+      const matched = await tx.execute<{ __id: string }>(sql`
+        SELECT (${r.id})::text AS __id FROM ${this.from}
+        WHERE ${target} AND ${inScope}
+        ORDER BY ${r.id}
+        LIMIT ${req.limit + 1}`);
+      if (matched.rows.length > req.limit) {
+        throw tooManyRows(collection, req.limit, req.ids ? "ids" : "filter");
+      }
+      const candidates = matched.rows.map((row) => row.__id);
+      if (candidates.length === 0) return { updated: 0, failed: missing(requested, new Set()) };
+      await tx.execute(sql`
+        SELECT 1 FROM ${w.table} WHERE ${w.id} = ANY(${idArray(candidates, r.idType)})
+        ORDER BY ${w.id} FOR UPDATE`);
+      // Locked: what is in scope now stays so until COMMIT.
+      const current = await tx.execute<TableRow>(sql`
+        SELECT ${this.columns()} FROM ${this.from}
+        WHERE ${r.id} = ANY(${idArray(candidates, r.idType)}) AND ${inScope}
+        ORDER BY ${r.id}`);
+      const found = current.rows.map((row) => row.__id);
+      const failed = req.ids ? missing(requested, new Set(found)) : [];
+      if (found.length === 0) return { updated: 0, failed };
+      const set = patch
+        ? [
+            ...Object.keys(patch).map(
+              (f) => sql`${w.columns.get(f) as SQL} = ${this.value(f, patch[f])}`,
+            ),
+            ...(w.version ? [sql`${w.version} = ${w.version} + 1`] : []),
+          ]
+        : [];
+
+      const hook = this.onMutate;
+      const report = sctx?.changedRows;
+      const before = report ? current.rows.map((row) => this.serialize(row)) : [];
+      if (!hook) {
+        const these = idArray(found, r.idType);
+        if (req.op === "delete") {
+          const res = await tx.execute(sql`DELETE FROM ${w.table} WHERE ${w.id} = ANY(${these})`);
+          report?.(before);
+          return { updated: res.rowCount ?? 0, failed };
+        }
+        if (set.length > 0) {
+          await tx.execute(
+            sql`UPDATE ${w.table} SET ${sql.join(set, sql`, `)} WHERE ${w.id} = ANY(${these})`,
+          );
+        }
+        const back = await tx.execute<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM ${this.from}
+          WHERE ${r.id} = ANY(${these}) AND ${inScope}`);
+        if ((back.rows[0]?.n ?? 0) !== found.length) {
+          throw new UdcError(
+            "forbidden",
+            `the row would fall outside the row scope of ${collection}`,
+            {
+              collection,
+              reason: "out_of_scope",
+            },
+          );
+        }
+        if (report) {
+          const after = await tx.execute<TableRow>(sql`
+            SELECT ${this.columns()} FROM ${this.from} WHERE ${r.id} = ANY(${these})`);
+          report([...before, ...after.rows.map((row) => this.serialize(row))]);
+        }
+        return { updated: found.length, failed };
+      }
+
+      const written: Row[] = [];
+      for (const row of current.rows) {
+        const id = row.__id;
+        const prior = this.serialize(row);
+        const idValue = idParam(id, r.idType);
+        if (req.op === "delete") {
+          await tx.execute(sql`DELETE FROM ${w.table} WHERE ${w.id} = ${idValue}`);
+          await this.finish(tx, sctx, {
+            op: "delete",
+            id,
+            before: prior,
+            after: null,
+            patch: null,
+          });
+          continue;
+        }
+        if (set.length > 0) {
+          await tx.execute(
+            sql`UPDATE ${w.table} SET ${sql.join(set, sql`, `)} WHERE ${w.id} = ${idValue}`,
+          );
+        }
+        const after = await this.readBack(tx, id, sctx);
+        written.push(after);
+        await this.finish(tx, sctx, {
+          op: "update",
+          id,
+          before: prior,
+          after,
+          patch: patch ?? {},
+        });
+      }
+      report?.([...current.rows.map((row) => this.serialize(row)), ...written]);
+      return { updated: found.length, failed };
     });
   }
 

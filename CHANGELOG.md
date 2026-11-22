@@ -7,6 +7,112 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-22
+
+Many rows changed in one request (`mutate_many`) under the caller's context
+and scope, the host's own actions typed end to end, search answered by the
+source and the change feed (notify, a bus across processes, an SSE stream under
+the scope), released together with `@jsudc/core` 0.5.0 and `@jsudc/react`
+0.5.0. Needs `@jsudc/core` 0.5.0. A host that changes nothing keeps 0.4.0's
+behaviour.
+
+### Added
+
+- The `mutate_many` action (`@jsudc/core`): update or delete many rows in one
+  request, by `ids` or by `filter` minus `except_ids`, under the context,
+  row scope and access rules of `mutate`. An id that is missing or outside
+  the scope is reported in `failed` as `not_found` and left alone; a filter
+  is ANDed with the scope. The patch is validated once, before anything is
+  written (read-only and hidden scope fields refused, pins kept); a patch
+  that would take a row out of the scope refuses the request. Each changed
+  row's version is bumped; no `expected_version`.
+- `PostgresJsonbSource` and `PostgresTableSource` implement it natively in
+  one transaction: the target rows locked in id order, one `UPDATE` /
+  `DELETE` without `onMutate`; with it, row by row, the hook called per row
+  with `before` / `after`, and a hook failure rolls the whole request back.
+- `createDispatcher` option `mutateManyLimit` (default
+  `DEFAULT_MUTATE_MANY_LIMIT`, 10 000): more ids, or a filter matching more
+  rows (counted with a bounded query, so with `total_count: false` too), is a
+  `validation_error` with `details.reason: "too_many_rows"`, nothing written.
+- A generic `mutate_many` for any source without a native one (`memory`, a
+  host's own): the rows read under scope, the checks done, then `mutate` per
+  row. `Source.mutateMany?(req, sctx)` (`SourceMutateMany`,
+  `MutateManyResult`) lets a host's source do it natively.
+- `capabilities.mutate_many` is `true` wherever `mutate` is (`describe`,
+  `collections`), unless a source sets it `false`.
+- Host actions typed end to end: `Dispatcher.register(action, handler)` takes
+  a `HostAction` from `@jsudc/core`'s `defineHostAction`; the handler
+  (`HostActionHandler`) is typed from it and receives the request context,
+  the payload is validated with its request schema, and the OpenAPI document
+  shows its response schema (`Dispatcher.responseOf(action)`).
+  `register(name, schema, handler)` is unchanged.
+- Search answered by the source. The dispatcher passes `ListRequest.search`
+  (`@jsudc/core`) to the source as `SourceListRequest.search` (optional,
+  trimmed; a blank text is no search), ANDed with the row scope and the
+  client's filter. A collection whose source does not report
+  `capabilities.search: "source"` refuses a `search` with `unsupported_op`
+  (`details.field: "search"`) instead of ignoring it.
+- `PostgresTableSource` option `search` (`PostgresTableSearch`): `match(q,
+  text)`, a condition in SQL with the text as a bound parameter, and
+  optional `rank(q, text)`. With it the source reports `search: "source"`;
+  a search without `sort` comes by rank (ties by id), paged by offset, with a
+  `next_cursor` that carries the next offset.
+- `withSearchIndex(source, { search })`: the search answered by an external
+  index (OpenSearch and the like). The host returns one page of ids in
+  relevance order (and a `total`) for `{ text, page, ctx, collection,
+  rowScope, filter?, sort? }` (`SearchIndexQuery`, `SearchIndexResult`,
+  `SearchIndexOptions`); jsudc loads those rows under the scope and the
+  filter, in that order, dropping the ones the scope hides.
+- `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`,
+  `decodeSearchCursor` for a source of your own that answers `search`.
+- `mutate_many` by `filter` does not take search text (documented).
+- The change feed: `createChangeFeed({ bus?, heartbeatMs?, retryMs?,
+  coalesce?, maxIds?, log? })` (`ChangeFeed`) given to `createDispatcher` as
+  the new option `changes`. With it, every collection reports
+  `capabilities.changes: true` (`subscribe` stays `false`), and `udcPlugin`
+  serves `GET /udc/changes?collections=a,b` as Server-Sent Events (it then
+  needs `registry`): `context` once at connect (a refusal is HTTP 401 / 403,
+  not a stream), each collection under the `access` rule of `list` (404
+  otherwise) and its row scope, a `retry:` hint, a `ready` event, `change`
+  events `{ collection, op, ids? }` with no row data, a heartbeat comment,
+  the listener removed when the client leaves, every stream ended on
+  `app.close()`. Works under the plugin's `prefix` and keeps headers a
+  host's hooks set (CORS). No replay. `registerChangesRoute`,
+  `ChangesRouteOptions`, `MAX_CHANGE_COLLECTIONS`.
+- jsudc's own writes notify after they commit, once per request, never for
+  a failed one: `mutate` (the row's id; an update also tested on the row as
+  it was), `mutate_many` (the changed ids), `reindex` and `tree.reparent`
+  (without ids). Without `changes` nothing runs and nothing changes.
+- `ChangeFeed.notify(collection, { op?, ids?, ctx?, rows? })` for a host's
+  own writes. The scope rule: a stream is told when its collection has no
+  row scope for it, or its scope (core's `evaluateFilter`) holds for at
+  least one changed row's values, and then only those rows' ids; the values
+  come from the written rows, the `eq` conditions of `rowScope(ctx,
+  collection)`, or the host's `rows`. A notify with neither `ctx` nor `rows`
+  on a collection that has a row scope throws. `NotifyOptions`, `eventFor`,
+  `scopeValues`, `ChangeSubscriber`, `ChangeFeed.listenerCount`.
+- Buses between server processes: `ChangeBus` (`publish` / `subscribe`, a
+  `ChangeNotice` with server-side `ChangeMatch` values), the default
+  in-process `MemoryChangeBus`, and `createPostgresChangeBus({
+  connectionString, pool?, channel?, reconnectDelayMs?, maxReconnectDelayMs?,
+  log? })` (`PostgresChangeBus`): a dedicated `LISTEN` connection that
+  reconnects with backoff, local delivery without the echo, a payload over
+  NOTIFY's limit sent without ids (`encodeNotice`, `NOTIFY_PAYLOAD_LIMIT`,
+  `DEFAULT_CHANGE_CHANNEL`).
+- Burst control per stream and collection (`coalesce`: past 20 events in
+  250 ms, one event without ids), and `maxIds` (500): a longer id list is
+  sent without ids.
+- `SourceContext.changedRows` (optional): on a `mutate_many` with a feed, a
+  source hands over the rows it wrote; both Postgres sources do. `ScopedCollection`
+  and `openCollection` take the feed as a new optional last argument.
+
+### Changed
+
+- The `@jsudc/core` peer range is `^0.5.0` (`mutate_many`, host actions, `ListRequest.search` and the change feed's
+  `ChangeEvent` come from core 0.5.0). The development
+  dependency is pinned to core's `release-0.5.0` commit until core 0.5.0 is on
+  npm.
+
 ## [0.4.0] - 2026-11-22
 
 Request context and a host-imposed row scope, the `postgres_table` source
@@ -200,7 +306,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/digital-cube/jsudc-server/compare/v0.2.0...v0.2.1

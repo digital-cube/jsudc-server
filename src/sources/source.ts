@@ -3,6 +3,8 @@ import {
   type FieldDef,
   type FilterNode,
   type ListResponse,
+  type MutateManyFailure,
+  type MutateManyOp,
   type MutateOp,
   type PageRequest,
   type Row,
@@ -21,6 +23,14 @@ export interface SourceListRequest {
   filter?: FilterNode | undefined;
   sort?: SortKey[] | undefined;
   page?: PageRequest | undefined;
+  /**
+   * The search box's text (`ListRequest.search`), for a source whose
+   * `capabilities.search` is `"source"`: the rows must match it as well as
+   * the filter (and the row scope). With no `sort` the source may order them
+   * by relevance. The generic layer refuses it for any other source, and
+   * passes it trimmed, never empty.
+   */
+  search?: string | undefined;
 }
 
 export interface SourceMutation {
@@ -28,6 +38,31 @@ export interface SourceMutation {
   id?: string | undefined;
   row?: Record<string, unknown> | undefined;
   expected_version?: number | undefined;
+}
+
+/**
+ * A `mutate_many` request as a source sees it: the collection resolved, the
+ * ids deduplicated, the patch with the row scope's pins written over, and
+ * `limit`, the most rows it may touch (the dispatcher's `mutateManyLimit`).
+ */
+export interface SourceMutateMany {
+  op: MutateManyOp;
+  /** The rows to change; exactly one of `ids` and `filter`. */
+  ids?: string[] | undefined;
+  /** The client's filter; a source with `enforcesRowScope` ANDs `SourceContext.rowScope` in. */
+  filter?: FilterNode | undefined;
+  /** With `filter`: matching rows left alone. */
+  except_ids?: string[] | undefined;
+  /** The patch of an `update`. */
+  row?: Record<string, unknown> | undefined;
+  /** More matching rows than this is a `validation_error`, before anything is written. */
+  limit: number;
+}
+
+/** What `mutateMany` answers: rows changed, and the ids of the request that were not there. */
+export interface MutateManyResult {
+  updated: number;
+  failed: MutateManyFailure[];
 }
 
 export interface SourceAddField {
@@ -108,6 +143,15 @@ export interface Source {
    * Refuses a cycle. Present when `capabilities.tree_reparent`.
    */
   reparent?(req: SourceTreeReparent, sctx?: SourceContext): Promise<TreeReparentResult>;
+  /**
+   * `mutate_many` natively, all or nothing (one transaction): the patch
+   * validated before anything is written, every changed row's version bumped,
+   * a filter matching more than `limit` rows refused. Only called on a source
+   * that applies the row scope itself (`enforcesRowScope`) or without one;
+   * otherwise, and when it is absent, the dispatcher reads the rows in scope
+   * and calls `mutate` for each.
+   */
+  mutateMany?(req: SourceMutateMany, sctx?: SourceContext): Promise<MutateManyResult>;
   /** The file the rows are read from, as written (`source.read`). Present when `capabilities.source_yaml`. */
   readSource?(sctx?: SourceContext): Promise<SourceReadResponse>;
   /** How the source reaches its rows now (an http_api credential, its cache TTL), for `describe`. */
@@ -133,6 +177,15 @@ export interface SourceContext {
    * `scope` of a `reindex` request, which names the rows to renumber.
    */
   rowScope?: FilterNode | undefined;
+  /**
+   * Present on a `mutate_many` when the server has a change feed: a source
+   * that can, hands over the rows it wrote (each as it was and, for an
+   * update, as it is now, with `__meta.id`) once it knows them, so the feed
+   * tells exactly the streams whose scope can see them. A source that
+   * ignores it still works: the feed then knows only the ids asked for and
+   * the row scope's pinned values.
+   */
+  changedRows?: ((rows: Row[]) => void) | undefined;
 }
 
 export const ALL_FILTER_OPS = [...SUPPORTED_OPS];

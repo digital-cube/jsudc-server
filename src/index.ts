@@ -13,6 +13,34 @@ export {
   type BlobRouteOptions,
   registerBlobRoute,
 } from "./blob.js";
+export {
+  type ChangeBus,
+  type ChangeCoalesceOptions,
+  ChangeFeed,
+  type ChangeFeedOptions,
+  type ChangeListener,
+  type ChangeMatch,
+  type ChangeNotice,
+  type ChangeSubscriber,
+  createChangeFeed,
+  eventFor,
+  MemoryChangeBus,
+  type NotifyOptions,
+  scopeValues,
+} from "./changes.js";
+export {
+  createPostgresChangeBus,
+  DEFAULT_CHANGE_CHANNEL,
+  encodeNotice,
+  NOTIFY_PAYLOAD_LIMIT,
+  PostgresChangeBus,
+  type PostgresChangeBusOptions,
+} from "./changes-postgres.js";
+export {
+  type ChangesRouteOptions,
+  MAX_CHANGE_COLLECTIONS,
+  registerChangesRoute,
+} from "./changes-route.js";
 export { deriveColumns } from "./columns.js";
 export { connect, type Db, type DbHandle, type Executor } from "./db/client.js";
 export { ensureUdcSchema, UDC_MIGRATIONS_DIR, udcMigrations } from "./db/ensure.js";
@@ -23,6 +51,7 @@ export {
   Dispatcher,
   type DispatcherOptions,
   type DispatchLogger,
+  type HostActionHandler,
 } from "./dispatcher.js";
 export {
   assertLookupTarget,
@@ -52,6 +81,7 @@ export {
 } from "./scope.js";
 export { type SeedOptions, type SeedResult, seedCollection } from "./seed.js";
 export { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./sources/array.js";
+export { DEFAULT_MUTATE_MANY_LIMIT } from "./sources/bulk.js";
 export { type CursorValue, decodeCursor, encodeCursor } from "./sources/cursor.js";
 export {
   cacheTtlEnvVar,
@@ -76,15 +106,29 @@ export { PostgresJsonbSource, type PostgresJsonbSourceOptions } from "./sources/
 export {
   type ColumnResolverOptions,
   columnResolver,
+  type PostgresTableSearch,
   PostgresTableSource,
   type PostgresTableSourceOptions,
   type TableFieldSpec,
 } from "./sources/postgres-table.js";
+export {
+  assertSearchable,
+  decodeSearchCursor,
+  encodeSearchCursor,
+  type SearchIndexOptions,
+  type SearchIndexQuery,
+  type SearchIndexResult,
+  searchPage,
+  searchText,
+  withSearchIndex,
+} from "./sources/search.js";
 export type {
+  MutateManyResult,
   Source,
   SourceAddField,
   SourceContext,
   SourceListRequest,
+  SourceMutateMany,
   SourceMutation,
   SourceReindex,
   SourceTreeReparent,

@@ -13,6 +13,7 @@ import type { Db, Executor } from "../db/client.js";
 import { applySchemaEdit, type SchemaEdit } from "../schema-edit.js";
 import { activeSchema, assertJsonbSchema, writeSchemaRevision } from "../schema-store.js";
 import { andFilters } from "../scope.js";
+import { idArray, missing, tooManyRows } from "./bulk.js";
 import { type CursorValue, decodeCursor, encodeCursor, isUuid } from "./cursor.js";
 import {
   assertQueryFields,
@@ -30,10 +31,12 @@ import {
   ALL_FILTER_OPS,
   DEFAULT_ORDER_FIELD,
   DEFAULT_PAGE_SIZE,
+  type MutateManyResult,
   type Source,
   type SourceAddField,
   type SourceContext,
   type SourceListRequest,
+  type SourceMutateMany,
   type SourceMutation,
   type SourceReindex,
   type SourceTreeReparent,
@@ -94,6 +97,7 @@ export class PostgresJsonbSource implements Source {
     tree_reparent: true,
     source_yaml: false,
     paging: ["cursor", "offset"],
+    mutate_many: true,
     supported_filter_ops: ALL_FILTER_OPS,
   };
 
@@ -268,6 +272,115 @@ export class PostgresJsonbSource implements Source {
     const version = current.rows[0]?.version;
     if (version === undefined || m.expected_version === undefined) throw notFound(id);
     throw versionConflict(id, m.expected_version, version);
+  }
+
+  /**
+   * `mutate_many` in one transaction. The patch and the filter are checked
+   * first; then the target rows (the ids, or the filter minus `except_ids`,
+   * always inside the row scope) are locked in id order, at most `limit + 1`
+   * of them, so a filter reaching more is refused before anything is
+   * written. Without `onMutate` one `UPDATE` / `DELETE` writes them all; with
+   * it, row by row, the hook called for each, and a hook failure rolls the
+   * whole request back. A patch taking a row out of the scope is refused
+   * (`forbidden`) and rolls back as well.
+   */
+  async mutateMany(req: SourceMutateMany, sctx?: SourceContext): Promise<MutateManyResult> {
+    const schema = await this.describe();
+    const patch = withoutMeta(req.row ?? {});
+    if (req.op === "update") assertValidRow(schema, patch, "patch");
+    assertQueryFields(schema, req.filter, undefined);
+    const rowScope = sctx?.rowScope;
+    const scope = rowScope ? compileFilter(rowScope, schema) : sql`TRUE`;
+    const requested = req.ids ?? [];
+    let target: SQL;
+    if (req.ids) {
+      const ids = req.ids.filter(isUuid);
+      if (ids.length === 0) return { updated: 0, failed: missing(requested, new Set()) };
+      target = sql`id = ANY(${idArray(ids, "uuid")})`;
+    } else {
+      const except = (req.except_ids ?? []).filter(isUuid);
+      const filter = compileFilter(req.filter, schema);
+      target =
+        except.length === 0
+          ? filter
+          : sql`${filter} AND NOT (id = ANY(${idArray(except, "uuid")}))`;
+    }
+    const hook = this.onMutate;
+    const collection = sctx?.collection ?? this.name;
+    const report = sctx?.changedRows;
+
+    return this.db.transaction(async (tx) => {
+      const locked = await tx.execute<DbRow>(sql`
+        SELECT id::text AS id, version, ${hook || report ? sql`data` : sql`NULL::jsonb AS data`}
+        FROM ${this.table}
+        WHERE ${target} AND ${scope}
+        ORDER BY id
+        LIMIT ${req.limit + 1}
+        FOR UPDATE`);
+      if (locked.rows.length > req.limit) {
+        throw tooManyRows(collection, req.limit, req.ids ? "ids" : "filter");
+      }
+      const found = locked.rows.map((r) => r.id);
+      const failed = req.ids ? missing(requested, new Set(found)) : [];
+      if (found.length === 0) return { updated: 0, failed };
+      const outOfScope = () =>
+        new UdcError("forbidden", `the row would fall outside the row scope of ${this.name}`, {
+          collection: this.name,
+          reason: "out_of_scope",
+        });
+
+      if (!hook) {
+        const these = idArray(found, "uuid");
+        if (req.op === "delete") {
+          const res = await tx.execute(sql`DELETE FROM ${this.table} WHERE id = ANY(${these})`);
+          report?.(locked.rows.map(serialize));
+          return { updated: res.rowCount ?? 0, failed };
+        }
+        const res = await tx.execute<DbRow & { in_scope: boolean }>(sql`
+          UPDATE ${this.table}
+          SET data = data || ${JSON.stringify(patch)}::jsonb, version = version + 1, updated_at = now()
+          WHERE id = ANY(${these})
+          RETURNING (${scope}) AS in_scope${report ? sql`, id::text AS id, version, data` : sql``}`);
+        if (rowScope && res.rows.some((r) => r.in_scope !== true)) throw outOfScope();
+        report?.([...locked.rows.map(serialize), ...res.rows.map(serialize)]);
+        return { updated: res.rowCount ?? 0, failed };
+      }
+
+      const check = rowScope ? sql`, (${scope}) AS __in_scope` : sql``;
+      const written: Row[] = [];
+      for (const current of locked.rows) {
+        const before = serialize(current);
+        let after: Row | null = null;
+        if (req.op === "update") {
+          const res = await tx.execute<ScopedRow>(sql`
+            UPDATE ${this.table}
+            SET data = data || ${JSON.stringify(patch)}::jsonb, version = version + 1, updated_at = now()
+            WHERE id = ${current.id}::uuid
+            RETURNING id::text AS id, version, data${check}`);
+          const row = res.rows[0] as ScopedRow;
+          if (row.__in_scope === false) throw outOfScope();
+          after = serialize(row);
+          written.push(after);
+        } else {
+          await tx.execute(sql`DELETE FROM ${this.table} WHERE id = ${current.id}::uuid`);
+        }
+        await runOnMutate(
+          hook,
+          sctx,
+          {
+            op: req.op,
+            collection,
+            id: current.id,
+            before,
+            after,
+            patch: req.op === "update" ? patch : null,
+          },
+          tx,
+        );
+      }
+      report?.([...locked.rows.map(serialize), ...written]);
+      return { updated: found.length, failed };
+    });
   }
 
   /** The row `id` in scope, locked `FOR UPDATE`; `null` when there is none. */
