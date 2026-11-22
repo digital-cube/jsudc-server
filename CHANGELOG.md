@@ -43,10 +43,35 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
   like an unknown field), id column of type `uuid` (default), `text` or
   `integer`, optional version column, a base `where`, `totalCount: false` (no
   `count(*)`, `total: null`, `capabilities.total_count: false`). The row scope
-  is compiled into the `WHERE` of `list` and `read`. `capabilities`: `mutate`,
+  is compiled into the `WHERE` of `list` and `read`. `capabilities`:
   `schema_edit`, `reindex`, `tree_reparent` false. `makeSource` builds it for
   `kind: postgres_table` in `source.yaml` (table, id / version columns, field →
   column names, `total_count`).
+- `postgres_table` writes: `mutate` inserts, updates (partial patch) and
+  deletes rows of the source's `table`, or of `writeTable` (with
+  `writeAlias`) under a `from` with joins; a `from` without one stays
+  read-only (`capabilities.mutate: false`, `unsupported_op`), as does any
+  source with `readOnly: true`. Only plain mapped columns are written: a
+  computed field, a column marked `readOnly` (`TableFieldSpec.readOnly`) or a
+  column of another table of the `from` in an insert or patch is refused with
+  `validation_error` naming it (`source.readOnlyFields`). With a
+  `versionColumn`, every update increments it and `expected_version` is
+  checked with the row locked (`version_conflict`, `details.current_version`);
+  without one the version is always `1` and `expected_version` is accepted and
+  not checked (no optimistic locking). The row scope is in the `WHERE` of
+  update and delete (outside → `not_found`), its `eq` values are forced on
+  insert, and the written row is read back through the `from` (outside the
+  scope or the base `where` → `forbidden`, rolled back). Every write is one
+  transaction.
+- `onMutate(ctx, change, tx)`, an option of `PostgresTableSource` and
+  `PostgresJsonbSource` (`OnMutateHook`, `OnMutateResult`, `RowChange`): a
+  host's own write on every mutation, run inside the transaction after the
+  source's statement and before `COMMIT`, with the row locked. `change` is `{
+  op, collection, id, before, after, patch }`, `tx` an executor on the same
+  transaction. A returned row is what the caller receives. A throw rolls
+  everything back: a `UdcError` reaches the caller as it is, anything else is
+  `internal` and logged. Without the option `postgres_jsonb` issues the same
+  statements as before, with no transaction added.
 - The SQL compiler is exported, around a field resolver: `compileFilter(node,
   schema, resolve?)`, `compileSort`, `orderBy`, `sortKeyColumns`,
   `cursorPredicate`, `encodeCursor`, `decodeCursor(cursor, keys, idType?)`,

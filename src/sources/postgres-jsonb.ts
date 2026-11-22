@@ -25,6 +25,7 @@ import {
   versionConflict,
   withoutMeta,
 } from "./fields.js";
+import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_ORDER_FIELD,
@@ -66,6 +67,12 @@ export interface PostgresJsonbSourceOptions {
   /** `schema.json`: served until a revision is active. */
   initialSchema: SchemaDoc;
   pageSizeDefault?: number;
+  /**
+   * A host's own write on every mutation: with it, each mutation runs in a
+   * transaction, and the hook runs after the source's statement and before
+   * `COMMIT`; see `OnMutateHook`. Without it the statements are those of 0.3.0.
+   */
+  onMutate?(ctx: unknown, change: RowChange, tx: Executor): OnMutateResult;
 }
 
 /**
@@ -95,6 +102,7 @@ export class PostgresJsonbSource implements Source {
   private readonly table: ReturnType<typeof sql.identifier>;
   private readonly initialSchema: SchemaDoc;
   private readonly pageSizeDefault: number;
+  private readonly onMutate: PostgresJsonbSourceOptions["onMutate"];
 
   constructor(opts: PostgresJsonbSourceOptions) {
     if (!FIELD_NAME_RE.test(opts.table)) {
@@ -108,6 +116,7 @@ export class PostgresJsonbSource implements Source {
     this.table = sql.identifier(opts.table);
     this.initialSchema = opts.initialSchema;
     this.pageSizeDefault = opts.pageSizeDefault ?? DEFAULT_PAGE_SIZE;
+    this.onMutate = opts.onMutate;
   }
 
   async describe(_sctx?: SourceContext): Promise<SchemaDoc> {
@@ -168,6 +177,27 @@ export class PostgresJsonbSource implements Source {
   async mutate(m: SourceMutation, sctx?: SourceContext): Promise<Row> {
     const schema = await this.describe();
     const rowScope = sctx?.rowScope;
+    const hook = this.onMutate;
+    if (hook) {
+      const scope = rowScope ? compileFilter(rowScope, schema) : sql`TRUE`;
+      return this.db.transaction(async (tx) => {
+        // The row as it was, locked until COMMIT; the write below decides not_found / conflict.
+        const before =
+          m.op !== "insert" && m.id !== undefined && isUuid(m.id)
+            ? await this.lockRow(tx, m.id, scope)
+            : null;
+        const written = await this.write(tx, schema, m, scope, rowScope);
+        const change: RowChange = {
+          op: m.op,
+          collection: sctx?.collection ?? this.name,
+          id: written.__meta.id,
+          before: m.op === "insert" ? null : (before ?? written),
+          after: m.op === "delete" ? null : written,
+          patch: m.op === "delete" ? null : withoutMeta(m.row ?? {}),
+        };
+        return runOnMutate(hook, sctx, change, tx);
+      });
+    }
     // Under a row scope, the written row must still be inside it: checked on the
     // RETURNING row, in a transaction that rolls the write back when it is not.
     if (rowScope) {
@@ -238,6 +268,15 @@ export class PostgresJsonbSource implements Source {
     const version = current.rows[0]?.version;
     if (version === undefined || m.expected_version === undefined) throw notFound(id);
     throw versionConflict(id, m.expected_version, version);
+  }
+
+  /** The row `id` in scope, locked `FOR UPDATE`; `null` when there is none. */
+  private async lockRow(tx: Executor, id: string, scope: SQL): Promise<Row | null> {
+    const res = await tx.execute<DbRow>(
+      sql`SELECT id, version, data FROM ${this.table} WHERE id = ${id}::uuid AND ${scope} FOR UPDATE`,
+    );
+    const row = res.rows[0];
+    return row ? serialize(row) : null;
   }
 
   /**

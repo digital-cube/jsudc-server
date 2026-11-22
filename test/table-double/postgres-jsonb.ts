@@ -5,12 +5,17 @@
  * unchanged against a `PostgresTableSource`.
  *
  * The suites keep writing their rows into the jsonb table (`insertRows`,
- * `seedCollection`, raw `insert into tasks`). Before every read this double
+ * `seedCollection`, raw `insert into tasks`). Before every read and write this double
  * copies those rows into `<table>__t_<hash of the schema>`, a real relational table with one
  * typed column per live field of the schema in use (bigint, numeric, date,
  * timestamptz, boolean, text, text[], jsonb), and serves that table through
  * `PostgresTableSource`. The copy runs over a pool of its own, so a suite that
  * spies on its pool sees only the source's statements.
+ *
+ * `mutate` writes the typed table through `PostgresTableSource`; a trigger on
+ * it mirrors every insert, update and delete back into the jsonb table (with
+ * `updated_at = now()` on update), in the same transaction, so a suite that
+ * reads the jsonb table with raw SQL (pg-mutate) sees the write.
  */
 import { createHash } from "node:crypto";
 import type { FieldDef, ListResponse, Row, SchemaDoc } from "@jsudc/core";
@@ -18,7 +23,7 @@ import { sql } from "drizzle-orm";
 import { afterAll } from "vitest";
 import { connect, type Db } from "../../src/db/client.js";
 import { PostgresTableSource } from "../../src/sources/postgres-table.js";
-import type { SourceContext, SourceListRequest } from "../../src/sources/source.js";
+import type { SourceContext, SourceListRequest, SourceMutation } from "../../src/sources/source.js";
 
 // Not imported from ./helpers.js: helpers imports this module (through the alias).
 const TEST_DATABASE_URL =
@@ -33,6 +38,7 @@ const own = connect(TEST_DATABASE_URL);
 afterAll(async () => {
   for (const table of copied.keys()) {
     await own.db.execute(sql`DROP TABLE IF EXISTS ${sql.identifier(table)}`);
+    await own.db.execute(sql`DROP FUNCTION IF EXISTS ${sql.identifier(`${table}_mirror`)}()`);
   }
   await own.close();
 });
@@ -115,6 +121,11 @@ export class PostgresJsonbSource {
     return this.source.read(id, sctx);
   }
 
+  async mutate(m: SourceMutation, sctx?: SourceContext): Promise<Row> {
+    await this.sync();
+    return this.source.mutate(m, sctx);
+  }
+
   /** (Re)build the typed table from the jsonb rows when they changed since the last copy. */
   private sync(): Promise<void> {
     const run = chain.then(() => this.copy());
@@ -140,11 +151,31 @@ export class PostgresJsonbSource {
     await own.db.transaction(async (tx) => {
       await tx.execute(sql`DROP TABLE IF EXISTS ${typed}`);
       await tx.execute(
-        sql`CREATE TABLE ${typed} (id uuid PRIMARY KEY, version integer NOT NULL${sql.join(defs)})`,
+        sql`CREATE TABLE ${typed} (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), version integer NOT NULL DEFAULT 1${sql.join(defs)})`,
       );
       await tx.execute(
         sql`INSERT INTO ${typed} (id, version${sql.join(names)}) SELECT id, version${sql.join(reads)} FROM ${origin}`,
       );
+      // After the copy: the copy itself is not mirrored.
+      const mirror = sql.identifier(`${this.typed}_mirror`);
+      const data = sql.raw(`jsonb_strip_nulls(to_jsonb(NEW) - 'id' - 'version')`);
+      await tx.execute(sql`
+        CREATE OR REPLACE FUNCTION ${mirror}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_OP = 'DELETE' THEN
+            DELETE FROM ${origin} WHERE id = OLD.id;
+            RETURN OLD;
+          ELSIF TG_OP = 'INSERT' THEN
+            INSERT INTO ${origin} (id, version, data) VALUES (NEW.id, NEW.version, ${data});
+          ELSE
+            UPDATE ${origin} SET version = NEW.version, data = ${data}, updated_at = now()
+            WHERE id = NEW.id;
+          END IF;
+          RETURN NEW;
+        END $$`);
+      await tx.execute(sql`
+        CREATE TRIGGER mirror AFTER INSERT OR UPDATE OR DELETE ON ${typed}
+        FOR EACH ROW EXECUTE FUNCTION ${mirror}()`);
     });
     copied.set(this.typed, fingerprint);
   }

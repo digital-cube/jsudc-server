@@ -71,6 +71,7 @@ export {
   type SourceLog,
 } from "./sources/http-api.js";
 export { MemorySource } from "./sources/memory.js";
+export type { OnMutateHook, OnMutateResult, RowChange } from "./sources/on-mutate.js";
 export { PostgresJsonbSource, type PostgresJsonbSourceOptions } from "./sources/postgres-jsonb.js";
 export {
   type ColumnResolverOptions,

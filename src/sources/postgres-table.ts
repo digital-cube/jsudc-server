@@ -3,13 +3,17 @@ import {
   type FieldDef,
   type ListResponse,
   type Row,
+  type RowProblem,
   type SchemaDoc,
   UdcError,
+  validateRow,
 } from "@jsudc/core";
 import { type SQL, sql } from "drizzle-orm";
-import type { Db } from "../db/client.js";
+import type { Db, Executor } from "../db/client.js";
+import { rowScopePins, withoutFields } from "../scope.js";
 import { type CursorValue, decodeCursor, encodeCursor, isIdOfType } from "./cursor.js";
-import { assertQueryFields, notFound } from "./fields.js";
+import { assertQueryFields, notFound, versionConflict, withoutMeta } from "./fields.js";
+import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_PAGE_SIZE,
@@ -26,6 +30,7 @@ import {
   compileSort,
   cursorPredicate,
   type FieldResolver,
+  idParam,
   orderBy,
   type SqlArrayForm,
   type SqlIdType,
@@ -80,6 +85,12 @@ export interface TableFieldSpec {
   sql?: SQL | string | undefined;
   /** Computed: read, never written (the write side refuses it). Implied by `sql`. */
   computed?: boolean | undefined;
+  /**
+   * A column that is read but never written by a request (a creation time, a
+   * column a trigger maintains): an insert or patch naming it is refused with
+   * `validation_error`. Implied for a column of another table of a `from`.
+   */
+  readOnly?: boolean | undefined;
   /** `false`: refused in a filter like an unknown field and left out of `describe.filterable`. */
   filterable?: boolean | undefined;
   /** `false`: refused in a sort like an unknown field. */
@@ -102,8 +113,32 @@ export interface PostgresTableSourceOptions {
   idColumn?: string | undefined;
   /** `uuid` (default), `text` or `integer`; the cursor and `read` follow it. */
   idType?: SqlIdType | undefined;
-  /** An integer column served as `__meta.version`; without one every row is version 1. */
+  /**
+   * An integer column served as `__meta.version`: written `1` on insert,
+   * incremented on every update, `expected_version` checked against it.
+   * Without one every row is version 1 and there is no optimistic locking
+   * (an `expected_version` is accepted and not checked).
+   */
   versionColumn?: string | undefined;
+  /**
+   * The table the rows of a `from` with joins live in (`inbox.message`):
+   * insert, update and delete go there. A `from` without it is read-only. A
+   * `table` source writes its table.
+   */
+  writeTable?: string | undefined;
+  /**
+   * The alias of `writeTable` inside `from` (`m`); default: the last part of
+   * `writeTable`. A column qualified by it (or not qualified) is written into
+   * `writeTable`; a column of any other table of the `from` is read-only.
+   */
+  writeAlias?: string | undefined;
+  /** `true`: never written (`capabilities.mutate: false`), even with a `table`. */
+  readOnly?: boolean | undefined;
+  /**
+   * A host's own write on every mutation, in the same transaction, after the
+   * source's statement and before `COMMIT`; see `OnMutateHook`.
+   */
+  onMutate?(ctx: unknown, change: RowChange, tx: Executor): OnMutateResult;
   /** A condition (SQL, from code) ANDed into every statement. */
   where?: SQL | string | undefined;
   /** `false`: no `count(*)` next to the page; `total` is `null`. Default `true`. */
@@ -134,11 +169,37 @@ interface TableRow extends Record<string, unknown> {
   __version: number;
 }
 
+/** A row read back after a write, with whether it is inside the row scope and the base `where`. */
+interface CheckedRow extends TableRow {
+  __in_scope: boolean;
+}
+
+/** Where and what a writable source writes: unqualified identifiers of `writeTable`. */
+interface WritePlan {
+  table: SQL;
+  id: SQL;
+  version: SQL | null;
+  /** Writable field → its column. */
+  columns: ReadonlyMap<string, SQL>;
+  /** Fields whose value goes to the column as JSON text (`json`, an array stored as jsonb). */
+  json: ReadonlySet<string>;
+}
+
+/** The parts of `a.b` (`[qualifier, column]`) or `b` (`[undefined, column]`). */
+function splitColumn(name: string): [string | undefined, string] {
+  const parts = name.split(".");
+  return parts.length === 2 ? [parts[0], parts[1] as string] : [undefined, name];
+}
+
 /**
  * A collection served from an ordinary relational table (or a `FROM` with
  * joins) with typed columns: the filter operators, sort, keyset cursor and
  * offset paging of `postgres_jsonb`, through the same compiler with a column
- * resolver. Read-only for now; the schema is the collection's `schema.json`.
+ * resolver. It writes the plain columns of its `table` (or `writeTable`):
+ * insert, partial update and delete, with the version column checked inside
+ * the statement and the row scope in its `WHERE`; computed and read-only
+ * fields are refused. Every write runs in a transaction, where a host's
+ * `onMutate` takes part. The schema is the collection's `schema.json`.
  */
 export class PostgresTableSource implements Source {
   readonly kind = "postgres_table";
@@ -149,6 +210,8 @@ export class PostgresTableSource implements Source {
   readonly notFilterable: readonly string[];
   /** The fields that are computed (an SQL expression): read, never written. */
   readonly computedFields: readonly string[];
+  /** Every field a request may not write: computed, `readOnly`, or a column of another table of a `from`. */
+  readonly readOnlyFields: readonly string[];
 
   private readonly db: Db;
   private readonly schema: SchemaDoc;
@@ -165,6 +228,11 @@ export class PostgresTableSource implements Source {
   private readonly keepNulls: boolean;
   private readonly pageSizeDefault: number;
   private readonly label: string;
+  /** Present when the source writes. */
+  private readonly writes: WritePlan | null;
+  /** The schema an insert or patch is validated against: the read-only fields are not in it. */
+  private readonly writeSchema: SchemaDoc;
+  private readonly onMutate: PostgresTableSourceOptions["onMutate"];
 
   constructor(opts: PostgresTableSourceOptions) {
     if ((opts.table === undefined) === (opts.from === undefined)) {
@@ -196,6 +264,8 @@ export class PostgresTableSource implements Source {
     const notFilterable: string[] = [];
     const notSortable: string[] = [];
     const computed: string[] = [];
+    const readOnly: string[] = [];
+    const columnOf: Record<string, string> = {};
     const live = schema.field_order.filter((f) => schema.fields[f] && !schema.fields[f]?.deleted);
     for (const field of live) {
       const entry = Object.hasOwn(given, field) ? given[field] : undefined;
@@ -208,6 +278,8 @@ export class PostgresTableSource implements Source {
           ? sql`(${raw(spec.sql)})`
           : identifier(spec.column ?? field, `column of ${field}`);
       if (spec.sql !== undefined || spec.computed) computed.push(field);
+      if (spec.sql !== undefined || spec.computed || spec.readOnly) readOnly.push(field);
+      else columnOf[field] = spec.column ?? field;
       if (spec.filterable === false) notFilterable.push(field);
       if (spec.sortable === false) notSortable.push(field);
       if (spec.array && ARRAY_TYPES.has((schema.fields[field] as FieldDef).type)) {
@@ -217,6 +289,10 @@ export class PostgresTableSource implements Source {
     this.selected = live.map((field) => ({ field, expr: exprs[field] as SQL }));
     this.notFilterable = notFilterable;
     this.computedFields = computed;
+    this.onMutate = opts.onMutate;
+    this.writes = opts.readOnly ? null : writePlan(opts, schema, columnOf, readOnly, arrayForms);
+    this.readOnlyFields = readOnly;
+    this.writeSchema = withoutFields(schema, new Set(readOnly));
     this.filterSchema = withUnknown(schema, notFilterable);
     this.sortSchema = withUnknown(schema, notSortable);
     this.resolver = columnResolver({
@@ -226,7 +302,7 @@ export class PostgresTableSource implements Source {
       idType: opts.idType ?? "uuid",
     });
     this.capabilities = {
-      mutate: false,
+      mutate: this.writes !== null,
       subscribe: false,
       total_count: this.totalCount,
       schema_edit: false,
@@ -304,8 +380,144 @@ export class PostgresTableSource implements Source {
     return this.serialize(row);
   }
 
-  mutate(_m: SourceMutation, _sctx?: SourceContext): Promise<Row> {
-    return Promise.reject(this.readOnly("mutate"));
+  /**
+   * One transaction: insert, or lock the row, read it as it is (in scope),
+   * check the version, write; read the row back through the `from` (still in
+   * scope), then run `onMutate`. A failure anywhere rolls all of it back.
+   */
+  async mutate(m: SourceMutation, sctx?: SourceContext): Promise<Row> {
+    const w = this.writes;
+    if (!w) throw this.readOnly("mutate");
+    const pins = rowScopePins(sctx?.rowScope);
+    if (m.op === "insert") {
+      const row = this.writable({ ...withoutMeta(m.row ?? {}), ...pins }, pins, "insert");
+      return this.db.transaction(async (tx) => {
+        const cols = Object.keys(row);
+        const names = [
+          ...cols.map((f) => w.columns.get(f) as SQL),
+          ...(w.version ? [w.version] : []),
+        ];
+        const values = [...cols.map((f) => this.value(f, row[f])), ...(w.version ? [sql`1`] : [])];
+        const res = await tx.execute<{ __id: string }>(
+          names.length === 0
+            ? sql`INSERT INTO ${w.table} DEFAULT VALUES RETURNING (${w.id})::text AS __id`
+            : sql`INSERT INTO ${w.table} (${sql.join(names, sql`, `)})
+                VALUES (${sql.join(values, sql`, `)}) RETURNING (${w.id})::text AS __id`,
+        );
+        const id = (res.rows[0] as { __id: string }).__id;
+        const after = await this.readBack(tx, id, sctx);
+        return this.finish(tx, sctx, { op: "insert", id, before: null, after, patch: row });
+      });
+    }
+
+    if (m.id === undefined) throw new UdcError("validation_error", `${m.op} needs an id`);
+    const id = m.id;
+    const patch =
+      m.op === "update"
+        ? this.writable(pinned(withoutMeta(m.row ?? {}), pins), pins, "patch")
+        : null;
+    if (!isIdOfType(id, this.resolver.idType)) throw notFound(id);
+    const idValue = idParam(id, this.resolver.idType);
+
+    return this.db.transaction(async (tx) => {
+      // Lock the row first: the version read below cannot change until COMMIT,
+      // and the row stays locked while `onMutate` runs.
+      const locked = await tx.execute(
+        sql`SELECT 1 FROM ${w.table} WHERE ${w.id} = ${idValue} FOR UPDATE`,
+      );
+      if (locked.rows.length === 0) throw notFound(id);
+      // Outside the scope (or the base `where`) the row does not exist for this request.
+      const found = await tx.execute<TableRow>(sql`
+        SELECT ${this.columns()} FROM ${this.from}
+        WHERE ${this.resolver.id} = ${idValue} AND ${this.baseWhere} AND ${this.scopeSql(sctx)}`);
+      const current = found.rows[0];
+      if (!current) throw notFound(id);
+      const before = this.serialize(current);
+      const expected = w.version ? m.expected_version : undefined;
+      if (expected !== undefined && current.__version !== expected) {
+        throw versionConflict(id, expected, current.__version);
+      }
+      const versionCheck =
+        expected === undefined || !w.version ? sql`` : sql` AND ${w.version} = ${expected}`;
+
+      if (m.op === "delete") {
+        await tx.execute(sql`DELETE FROM ${w.table} WHERE ${w.id} = ${idValue}${versionCheck}`);
+        return this.finish(tx, sctx, { op: "delete", id, before, after: null, patch: null });
+      }
+      const fields = Object.keys(patch ?? {});
+      const set = [
+        ...fields.map((f) => sql`${w.columns.get(f) as SQL} = ${this.value(f, patch?.[f])}`),
+        ...(w.version ? [sql`${w.version} = ${w.version} + 1`] : []),
+      ];
+      if (set.length > 0) {
+        await tx.execute(sql`
+          UPDATE ${w.table} SET ${sql.join(set, sql`, `)}
+          WHERE ${w.id} = ${idValue}${versionCheck}`);
+      }
+      const after = await this.readBack(tx, id, sctx);
+      return this.finish(tx, sctx, { op: "update", id, before, after, patch: patch ?? {} });
+    });
+  }
+
+  /**
+   * The fields of an insert or patch, checked: a read-only field is refused
+   * by name, the rest validated against the schema. A pinned scope value on a
+   * read-only field is left to the scope check of the written row.
+   */
+  private writable(
+    row: Record<string, unknown>,
+    pins: Record<string, unknown>,
+    mode: "insert" | "patch",
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const problems: RowProblem[] = [];
+    for (const [field, value] of Object.entries(row)) {
+      if (!this.readOnlyFields.includes(field)) out[field] = value;
+      else if (!(Object.hasOwn(pins, field) && pins[field] === value)) {
+        problems.push({ field, message: "is read-only" });
+      }
+    }
+    problems.push(...validateRow(this.writeSchema, out, { mode }));
+    if (problems.length > 0) {
+      const summary = problems.map((p) => `${p.field} ${p.message}`).join("; ");
+      throw new UdcError("validation_error", `invalid row: ${summary}`, { problems });
+    }
+    return out;
+  }
+
+  /** A field's value as a statement parameter, typed by the column it goes to. */
+  private value(field: string, v: unknown): SQL {
+    if (v === null || v === undefined) return sql`NULL`;
+    return sql`${sql.param(this.writes?.json.has(field) ? JSON.stringify(v) : v)}`;
+  }
+
+  /** The row as written, read through the `from`; `forbidden` when it left the row scope. */
+  private async readBack(tx: Executor, id: string, sctx: SourceContext | undefined): Promise<Row> {
+    const res = await tx.execute<CheckedRow>(sql`
+      SELECT ${this.columns()}, (${this.baseWhere} AND ${this.scopeSql(sctx)}) AS __in_scope
+      FROM ${this.from}
+      WHERE ${this.resolver.id} = ${idParam(id, this.resolver.idType)}`);
+    const row = res.rows[0];
+    if (!row?.__in_scope) {
+      const collection = sctx?.collection ?? this.label;
+      throw new UdcError("forbidden", `the row would fall outside the row scope of ${collection}`, {
+        collection,
+        reason: "out_of_scope",
+      });
+    }
+    return this.serialize(row);
+  }
+
+  /** Run `onMutate` (when given) on the change; answer the row the caller receives. */
+  private finish(
+    tx: Executor,
+    sctx: SourceContext | undefined,
+    change: Omit<RowChange, "collection">,
+  ): Promise<Row> {
+    const full: RowChange = { ...change, collection: sctx?.collection ?? this.label };
+    const hook = this.onMutate;
+    if (!hook) return Promise.resolve((full.after ?? full.before) as Row);
+    return runOnMutate(hook, sctx, full, tx);
   }
 
   addField(_req: SourceAddField, _sctx?: SourceContext): Promise<SchemaDoc> {
@@ -352,6 +564,72 @@ export class PostgresTableSource implements Source {
     });
     return out;
   }
+}
+
+/** A patch with the row scope's pinned values written over the fields it names. */
+function pinned(
+  patch: Record<string, unknown>,
+  pins: Record<string, unknown>,
+): Record<string, unknown> {
+  const out = { ...patch };
+  for (const [field, value] of Object.entries(pins)) {
+    if (Object.hasOwn(out, field)) out[field] = value;
+  }
+  return out;
+}
+
+/**
+ * What a source writes, or `null` when it is read-only (a `from` without a
+ * `writeTable`). A field whose column is qualified by another table of the
+ * `from` joins `readOnly`. The id and version columns must be columns of the
+ * write table.
+ */
+function writePlan(
+  opts: PostgresTableSourceOptions,
+  schema: SchemaDoc,
+  columnOf: Record<string, string>,
+  readOnly: string[],
+  arrayForms: Record<string, SqlArrayForm>,
+): WritePlan | null {
+  if (opts.table !== undefined && opts.writeTable !== undefined) {
+    throw new Error(
+      "PostgresTableSource: writeTable goes with from; a table source writes its table",
+    );
+  }
+  const target = opts.table ?? opts.writeTable;
+  if (target === undefined) return null;
+  const alias = opts.writeAlias ?? target.split(".").at(-1);
+  /** The unqualified column, or `null` when it belongs to another table. */
+  const own = (name: string): string | null => {
+    const [q, col] = splitColumn(name);
+    return q === undefined || q === alias ? col : null;
+  };
+  const ownOrThrow = (name: string, what: string): SQL => {
+    const col = own(name);
+    if (col === null)
+      throw new Error(`PostgresTableSource: ${what} ${name} is not a column of ${target}`);
+    return identifier(col, what);
+  };
+  const columns = new Map<string, SQL>();
+  const json = new Set<string>();
+  for (const [field, name] of Object.entries(columnOf)) {
+    const col = own(name);
+    if (col === null) {
+      readOnly.push(field);
+      continue;
+    }
+    columns.set(field, identifier(col, `column of ${field}`));
+    const type = (schema.fields[field] as FieldDef).type;
+    if (type === "json" || arrayForms[field] === "jsonb") json.add(field);
+  }
+  return {
+    table: identifier(target, "write table"),
+    id: ownOrThrow(opts.idColumn ?? "id", "id column"),
+    version:
+      opts.versionColumn === undefined ? null : ownOrThrow(opts.versionColumn, "version column"),
+    columns,
+    json,
+  };
 }
 
 /** `schema` with `fields` soft-deleted: the allowlist refuses them as unknown. */
