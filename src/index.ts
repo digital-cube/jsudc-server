@@ -13,6 +13,34 @@ export {
   type BlobRouteOptions,
   registerBlobRoute,
 } from "./blob.js";
+export {
+  type ChangeBus,
+  type ChangeCoalesceOptions,
+  ChangeFeed,
+  type ChangeFeedOptions,
+  type ChangeListener,
+  type ChangeMatch,
+  type ChangeNotice,
+  type ChangeSubscriber,
+  createChangeFeed,
+  eventFor,
+  MemoryChangeBus,
+  type NotifyOptions,
+  scopeValues,
+} from "./changes.js";
+export {
+  createPostgresChangeBus,
+  DEFAULT_CHANGE_CHANNEL,
+  encodeNotice,
+  NOTIFY_PAYLOAD_LIMIT,
+  PostgresChangeBus,
+  type PostgresChangeBusOptions,
+} from "./changes-postgres.js";
+export {
+  type ChangesRouteOptions,
+  MAX_CHANGE_COLLECTIONS,
+  registerChangesRoute,
+} from "./changes-route.js";
 export { deriveColumns } from "./columns.js";
 export { connect, type Db, type DbHandle, type Executor } from "./db/client.js";
 export { ensureUdcSchema, UDC_MIGRATIONS_DIR, udcMigrations } from "./db/ensure.js";

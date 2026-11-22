@@ -307,10 +307,11 @@ export class PostgresJsonbSource implements Source {
     }
     const hook = this.onMutate;
     const collection = sctx?.collection ?? this.name;
+    const report = sctx?.changedRows;
 
     return this.db.transaction(async (tx) => {
       const locked = await tx.execute<DbRow>(sql`
-        SELECT id::text AS id, version, ${hook ? sql`data` : sql`NULL::jsonb AS data`}
+        SELECT id::text AS id, version, ${hook || report ? sql`data` : sql`NULL::jsonb AS data`}
         FROM ${this.table}
         WHERE ${target} AND ${scope}
         ORDER BY id
@@ -332,18 +333,21 @@ export class PostgresJsonbSource implements Source {
         const these = idArray(found, "uuid");
         if (req.op === "delete") {
           const res = await tx.execute(sql`DELETE FROM ${this.table} WHERE id = ANY(${these})`);
+          report?.(locked.rows.map(serialize));
           return { updated: res.rowCount ?? 0, failed };
         }
-        const res = await tx.execute<{ in_scope: boolean }>(sql`
+        const res = await tx.execute<DbRow & { in_scope: boolean }>(sql`
           UPDATE ${this.table}
           SET data = data || ${JSON.stringify(patch)}::jsonb, version = version + 1, updated_at = now()
           WHERE id = ANY(${these})
-          RETURNING (${scope}) AS in_scope`);
+          RETURNING (${scope}) AS in_scope${report ? sql`, id::text AS id, version, data` : sql``}`);
         if (rowScope && res.rows.some((r) => r.in_scope !== true)) throw outOfScope();
+        report?.([...locked.rows.map(serialize), ...res.rows.map(serialize)]);
         return { updated: res.rowCount ?? 0, failed };
       }
 
       const check = rowScope ? sql`, (${scope}) AS __in_scope` : sql``;
+      const written: Row[] = [];
       for (const current of locked.rows) {
         const before = serialize(current);
         let after: Row | null = null;
@@ -356,6 +360,7 @@ export class PostgresJsonbSource implements Source {
           const row = res.rows[0] as ScopedRow;
           if (row.__in_scope === false) throw outOfScope();
           after = serialize(row);
+          written.push(after);
         } else {
           await tx.execute(sql`DELETE FROM ${this.table} WHERE id = ${current.id}::uuid`);
         }
@@ -373,6 +378,7 @@ export class PostgresJsonbSource implements Source {
           tx,
         );
       }
+      report?.([...locked.rows.map(serialize), ...written]);
       return { updated: found.length, failed };
     });
   }

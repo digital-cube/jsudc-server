@@ -177,6 +177,15 @@ export interface SourceContext {
    * `scope` of a `reindex` request, which names the rows to renumber.
    */
   rowScope?: FilterNode | undefined;
+  /**
+   * Present on a `mutate_many` when the server has a change feed: a source
+   * that can, hands over the rows it wrote (each as it was and, for an
+   * update, as it is now, with `__meta.id`) once it knows them, so the feed
+   * tells exactly the streams whose scope can see them. A source that
+   * ignores it still works: the feed then knows only the ids asked for and
+   * the row scope's pinned values.
+   */
+  changedRows?: ((rows: Row[]) => void) | undefined;
 }
 
 export const ALL_FILTER_OPS = [...SUPPORTED_OPS];

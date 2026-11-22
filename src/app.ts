@@ -14,6 +14,7 @@ import Fastify, {
 } from "fastify";
 import { z } from "zod";
 import { registerBlobRoute } from "./blob.js";
+import { registerChangesRoute } from "./changes-route.js";
 import type { Dispatcher } from "./dispatcher.js";
 import { checkRegistryLinks } from "./links.js";
 import type { CollectionRegistry } from "./registry.js";
@@ -50,7 +51,9 @@ export interface UdcPluginOptions {
   /**
    * With it, `GET /udc/files/blob` serves file previews of filesystem
    * collections, and the plugin checks every lookup and `row_link` against
-   * the active schemas before it serves (`checkRegistryLinks`).
+   * the active schemas before it serves (`checkRegistryLinks`). Required
+   * when the dispatcher has a change feed (`changes`): the plugin then serves
+   * `GET /udc/changes` (Server-Sent Events) as well.
    */
   registry?: CollectionRegistry | undefined;
   /** `false` skips that check (a registry whose database is not there yet). Default `true`. */
@@ -178,6 +181,15 @@ export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): P
   app.get("/healthz", { schema: { hide: true } }, async () => ({ ok: true }));
   if (opts.registry) {
     registerBlobRoute(app, opts.registry, {
+      context: opts.context?.bind(opts),
+      scope: dispatcher.scopeOptions,
+    });
+  }
+  if (dispatcher.changes) {
+    if (!opts.registry) {
+      throw new Error("udcPlugin: a dispatcher with a change feed needs the registry option");
+    }
+    registerChangesRoute(app, opts.registry, dispatcher.changes, {
       context: opts.context?.bind(opts),
       scope: dispatcher.scopeOptions,
     });

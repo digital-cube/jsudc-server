@@ -595,10 +595,13 @@ export class PostgresTableSource implements Source {
         : [];
 
       const hook = this.onMutate;
+      const report = sctx?.changedRows;
+      const before = report ? current.rows.map((row) => this.serialize(row)) : [];
       if (!hook) {
         const these = idArray(found, r.idType);
         if (req.op === "delete") {
           const res = await tx.execute(sql`DELETE FROM ${w.table} WHERE ${w.id} = ANY(${these})`);
+          report?.(before);
           return { updated: res.rowCount ?? 0, failed };
         }
         if (set.length > 0) {
@@ -619,16 +622,28 @@ export class PostgresTableSource implements Source {
             },
           );
         }
+        if (report) {
+          const after = await tx.execute<TableRow>(sql`
+            SELECT ${this.columns()} FROM ${this.from} WHERE ${r.id} = ANY(${these})`);
+          report([...before, ...after.rows.map((row) => this.serialize(row))]);
+        }
         return { updated: found.length, failed };
       }
 
+      const written: Row[] = [];
       for (const row of current.rows) {
         const id = row.__id;
-        const before = this.serialize(row);
+        const prior = this.serialize(row);
         const idValue = idParam(id, r.idType);
         if (req.op === "delete") {
           await tx.execute(sql`DELETE FROM ${w.table} WHERE ${w.id} = ${idValue}`);
-          await this.finish(tx, sctx, { op: "delete", id, before, after: null, patch: null });
+          await this.finish(tx, sctx, {
+            op: "delete",
+            id,
+            before: prior,
+            after: null,
+            patch: null,
+          });
           continue;
         }
         if (set.length > 0) {
@@ -637,8 +652,16 @@ export class PostgresTableSource implements Source {
           );
         }
         const after = await this.readBack(tx, id, sctx);
-        await this.finish(tx, sctx, { op: "update", id, before, after, patch: patch ?? {} });
+        written.push(after);
+        await this.finish(tx, sctx, {
+          op: "update",
+          id,
+          before: prior,
+          after,
+          patch: patch ?? {},
+        });
       }
+      report?.([...current.rows.map((row) => this.serialize(row)), ...written]);
       return { updated: found.length, failed };
     });
   }

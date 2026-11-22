@@ -17,6 +17,7 @@ import {
   type UdcMessage,
 } from "@jsudc/core";
 import type { z } from "zod";
+import type { ChangeFeed } from "./changes.js";
 import { assertLookupTarget } from "./links.js";
 import type { CollectionRegistry } from "./registry.js";
 import { openCollection, type RowScopeOptions, ScopedCollection } from "./scope.js";
@@ -61,6 +62,13 @@ export interface DispatcherOptions<Ctx = unknown> extends RowScopeOptions<Ctx> {
    * 10 000 (`DEFAULT_MUTATE_MANY_LIMIT`).
    */
   mutateManyLimit?: number | undefined;
+  /**
+   * The change feed (`createChangeFeed`): every collection then reports
+   * `capabilities.changes`, `mutate`, `mutate_many`, `reindex` and
+   * `tree.reparent` notify it after they commit, and `udcPlugin` serves the
+   * stream at `GET /udc/changes`. Without it nothing changes.
+   */
+  changes?: ChangeFeed | undefined;
 }
 
 /**
@@ -73,6 +81,8 @@ export class Dispatcher {
   private readonly log: DispatchLogger;
   /** The host's `rowScope`, `access` and `showScopeFields`, for the routes that reach rows outside `dispatch`. */
   readonly scopeOptions: RowScopeOptions;
+  /** The change feed this dispatcher's writes notify and the plugin streams; `undefined` without one. */
+  readonly changes: ChangeFeed | undefined;
 
   constructor(opts: DispatcherOptions) {
     this.log = opts.log;
@@ -82,6 +92,8 @@ export class Dispatcher {
       ...(opts.access ? { access: opts.access.bind(opts) } : {}),
       ...(opts.showScopeFields ? { showScopeFields: opts.showScopeFields } : {}),
     };
+    this.changes = opts.changes;
+    this.changes?.attach(this.scopeOptions, this.log);
   }
 
   /** An action by name with the Zod schema of its payload. */
@@ -256,8 +268,9 @@ export function createDispatcher<Ctx = unknown>(
       `createDispatcher: mutateManyLimit must be a positive integer, not ${bulkLimit}`,
     );
   }
+  const feed = dispatcher.changes;
   const open = (action: string, collection: string, ctx: unknown) =>
-    openCollection(registry, scoping, action, collection, ctx);
+    openCollection(registry, scoping, action, collection, ctx, feed);
   return dispatcher
     .register("collections", ACTIONS.collections.request, (_, ctx): CollectionsResponse => {
       const collections = registry
@@ -265,7 +278,7 @@ export function createDispatcher<Ctx = unknown>(
         .filter(
           (c) => scoping.access?.(ctx, { action: "collections", collection: c.name }) !== false,
         )
-        .map((c) => new ScopedCollection(c, ctx, scoping));
+        .map((c) => new ScopedCollection(c, ctx, scoping, feed));
       return {
         collections: collections.map((s) => ({
           name: s.collection.name,
