@@ -11,16 +11,19 @@ import {
 import { type SQL, sql } from "drizzle-orm";
 import type { Db, Executor } from "../db/client.js";
 import { rowScopePins, withoutFields } from "../scope.js";
+import { idArray, missing, tooManyRows } from "./bulk.js";
 import { type CursorValue, decodeCursor, encodeCursor, isIdOfType } from "./cursor.js";
 import { assertQueryFields, notFound, versionConflict, withoutMeta } from "./fields.js";
 import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_PAGE_SIZE,
+  type MutateManyResult,
   type Source,
   type SourceAddField,
   type SourceContext,
   type SourceListRequest,
+  type SourceMutateMany,
   type SourceMutation,
   type SourceUpdateField,
 } from "./source.js";
@@ -303,6 +306,7 @@ export class PostgresTableSource implements Source {
     });
     this.capabilities = {
       mutate: this.writes !== null,
+      mutate_many: this.writes !== null,
       subscribe: false,
       total_count: this.totalCount,
       schema_edit: false,
@@ -456,6 +460,125 @@ export class PostgresTableSource implements Source {
       }
       const after = await this.readBack(tx, id, sctx);
       return this.finish(tx, sctx, { op: "update", id, before, after, patch: patch ?? {} });
+    });
+  }
+
+  /**
+   * `mutate_many` in one transaction. The patch (read-only fields refused, as
+   * in `mutate`) and the filter are checked first. The target rows — the ids,
+   * or the filter minus `except_ids`, inside the base `where` and the row
+   * scope, at most `limit + 1` so a filter reaching more is refused before
+   * anything is written — are locked in the write table in id order and
+   * checked in scope again. Without `onMutate` one `UPDATE` / `DELETE` of the
+   * write table writes them all, the version column bumped, and the rows are
+   * read back through the `from` to check they are still in scope. With it,
+   * row by row, the hook called for each; a hook failure, like a row leaving
+   * the scope, rolls the whole request back.
+   */
+  async mutateMany(req: SourceMutateMany, sctx?: SourceContext): Promise<MutateManyResult> {
+    const w = this.writes;
+    if (!w) throw this.readOnly("mutate_many");
+    const pins = rowScopePins(sctx?.rowScope);
+    const patch =
+      req.op === "update"
+        ? this.writable(pinned(withoutMeta(req.row ?? {}), pins), pins, "patch")
+        : null;
+    assertQueryFields(this.filterSchema, req.filter, undefined);
+    const r = this.resolver;
+    const inScope = sql`${this.baseWhere} AND ${this.scopeSql(sctx)}`;
+    const requested = req.ids ?? [];
+    let target: SQL;
+    if (req.ids) {
+      const ids = req.ids.filter((id) => isIdOfType(id, r.idType));
+      if (ids.length === 0) return { updated: 0, failed: missing(requested, new Set()) };
+      target = sql`${r.id} = ANY(${idArray(ids, r.idType)})`;
+    } else {
+      const except = (req.except_ids ?? []).filter((id) => isIdOfType(id, r.idType));
+      const filter = compileFilter(req.filter, this.filterSchema, r);
+      target =
+        except.length === 0
+          ? filter
+          : sql`${filter} AND NOT (${r.id} = ANY(${idArray(except, r.idType)}))`;
+    }
+    const collection = sctx?.collection ?? this.label;
+
+    return this.db.transaction(async (tx) => {
+      const matched = await tx.execute<{ __id: string }>(sql`
+        SELECT (${r.id})::text AS __id FROM ${this.from}
+        WHERE ${target} AND ${inScope}
+        ORDER BY ${r.id}
+        LIMIT ${req.limit + 1}`);
+      if (matched.rows.length > req.limit) {
+        throw tooManyRows(collection, req.limit, req.ids ? "ids" : "filter");
+      }
+      const candidates = matched.rows.map((row) => row.__id);
+      if (candidates.length === 0) return { updated: 0, failed: missing(requested, new Set()) };
+      await tx.execute(sql`
+        SELECT 1 FROM ${w.table} WHERE ${w.id} = ANY(${idArray(candidates, r.idType)})
+        ORDER BY ${w.id} FOR UPDATE`);
+      // Locked: what is in scope now stays so until COMMIT.
+      const current = await tx.execute<TableRow>(sql`
+        SELECT ${this.columns()} FROM ${this.from}
+        WHERE ${r.id} = ANY(${idArray(candidates, r.idType)}) AND ${inScope}
+        ORDER BY ${r.id}`);
+      const found = current.rows.map((row) => row.__id);
+      const failed = req.ids ? missing(requested, new Set(found)) : [];
+      if (found.length === 0) return { updated: 0, failed };
+      const set = patch
+        ? [
+            ...Object.keys(patch).map(
+              (f) => sql`${w.columns.get(f) as SQL} = ${this.value(f, patch[f])}`,
+            ),
+            ...(w.version ? [sql`${w.version} = ${w.version} + 1`] : []),
+          ]
+        : [];
+
+      const hook = this.onMutate;
+      if (!hook) {
+        const these = idArray(found, r.idType);
+        if (req.op === "delete") {
+          const res = await tx.execute(sql`DELETE FROM ${w.table} WHERE ${w.id} = ANY(${these})`);
+          return { updated: res.rowCount ?? 0, failed };
+        }
+        if (set.length > 0) {
+          await tx.execute(
+            sql`UPDATE ${w.table} SET ${sql.join(set, sql`, `)} WHERE ${w.id} = ANY(${these})`,
+          );
+        }
+        const back = await tx.execute<{ n: number }>(sql`
+          SELECT count(*)::int AS n FROM ${this.from}
+          WHERE ${r.id} = ANY(${these}) AND ${inScope}`);
+        if ((back.rows[0]?.n ?? 0) !== found.length) {
+          throw new UdcError(
+            "forbidden",
+            `the row would fall outside the row scope of ${collection}`,
+            {
+              collection,
+              reason: "out_of_scope",
+            },
+          );
+        }
+        return { updated: found.length, failed };
+      }
+
+      for (const row of current.rows) {
+        const id = row.__id;
+        const before = this.serialize(row);
+        const idValue = idParam(id, r.idType);
+        if (req.op === "delete") {
+          await tx.execute(sql`DELETE FROM ${w.table} WHERE ${w.id} = ${idValue}`);
+          await this.finish(tx, sctx, { op: "delete", id, before, after: null, patch: null });
+          continue;
+        }
+        if (set.length > 0) {
+          await tx.execute(
+            sql`UPDATE ${w.table} SET ${sql.join(set, sql`, `)} WHERE ${w.id} = ${idValue}`,
+          );
+        }
+        const after = await this.readBack(tx, id, sctx);
+        await this.finish(tx, sctx, { op: "update", id, before, after, patch: patch ?? {} });
+      }
+      return { updated: found.length, failed };
     });
   }
 

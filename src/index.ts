@@ -23,6 +23,7 @@ export {
   Dispatcher,
   type DispatcherOptions,
   type DispatchLogger,
+  type HostActionHandler,
 } from "./dispatcher.js";
 export {
   assertLookupTarget,
@@ -52,6 +53,7 @@ export {
 } from "./scope.js";
 export { type SeedOptions, type SeedResult, seedCollection } from "./seed.js";
 export { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./sources/array.js";
+export { DEFAULT_MUTATE_MANY_LIMIT } from "./sources/bulk.js";
 export { type CursorValue, decodeCursor, encodeCursor } from "./sources/cursor.js";
 export {
   cacheTtlEnvVar,
@@ -81,10 +83,12 @@ export {
   type TableFieldSpec,
 } from "./sources/postgres-table.js";
 export type {
+  MutateManyResult,
   Source,
   SourceAddField,
   SourceContext,
   SourceListRequest,
+  SourceMutateMany,
   SourceMutation,
   SourceReindex,
   SourceTreeReparent,

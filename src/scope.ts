@@ -6,7 +6,10 @@ import {
   type FilterNode,
   isCondition,
   isRowIdField,
+  isUdcError,
   type ListResponse,
+  MAX_PAGE_LIMIT,
+  type MutateManyFailure,
   ROW_ID,
   type Row,
   type SchemaDoc,
@@ -15,11 +18,14 @@ import {
 } from "@jsudc/core";
 import { buildDescribe } from "./describe.js";
 import type { Collection, CollectionRegistry } from "./registry.js";
+import { notFoundFailure, tooManyRows } from "./sources/bulk.js";
 import { assertValidRow, filterFields, notFound, withoutMeta } from "./sources/fields.js";
 import type {
+  MutateManyResult,
   Source,
   SourceContext,
   SourceListRequest,
+  SourceMutateMany,
   SourceMutation,
   SourceReindex,
   SourceTreeReparent,
@@ -224,7 +230,9 @@ export class ScopedCollection {
    * (respectively `source.read`).
    */
   capabilities(): Capabilities {
-    const caps = this.source.capabilities;
+    const own = this.source.capabilities;
+    // `mutate_many` wherever `mutate` is (natively, or by the generic layer) unless the source says no.
+    const caps: Capabilities = { ...own, mutate_many: own.mutate_many ?? own.mutate };
     if (!this.rowScope) return caps;
     return {
       ...caps,
@@ -310,6 +318,124 @@ export class ScopedCollection {
       await this.readInScope(m.id);
     }
     return this.strip(await this.source.mutate(op, this.sctx));
+  }
+
+  /**
+   * `mutate_many` under this request's scope. Hidden scope fields are refused
+   * in the patch and the filter, the scope's pins are written over the patch,
+   * and `ids` beyond `limit` are refused. A source with a native `mutateMany`
+   * that applies the scope itself does the rest in one transaction; any other
+   * goes through `mutateManyGeneric`.
+   */
+  async mutateMany(req: SourceMutateMany): Promise<MutateManyResult> {
+    const ids = req.ids === undefined ? undefined : [...new Set(req.ids)];
+    if (ids && ids.length > req.limit) throw tooManyRows(this.collection.name, req.limit, "ids");
+    this.refuseHidden(req.filter, undefined);
+    let row: Record<string, unknown> | undefined;
+    if (req.op === "update") {
+      const given = withoutMeta(req.row ?? {});
+      if (Object.keys(given).some((f) => this.hidden.has(f))) {
+        const visible = withoutFields(await this.schema(), this.hidden);
+        assertValidRow(visible, given, "patch");
+      }
+      row = { ...given };
+      for (const [field, value] of Object.entries(rowScopePins(this.rowScope))) {
+        if (Object.hasOwn(row, field)) row[field] = value;
+      }
+    }
+    const op: SourceMutateMany = {
+      op: req.op,
+      limit: req.limit,
+      ...(ids === undefined ? {} : { ids }),
+      ...(req.filter === undefined ? {} : { filter: req.filter }),
+      ...(req.except_ids === undefined ? {} : { except_ids: req.except_ids }),
+      ...(row === undefined ? {} : { row }),
+    };
+    const { source } = this;
+    if (source.mutateMany && (!this.rowScope || this.native)) {
+      return source.mutateMany(op, this.sctx);
+    }
+    return this.mutateManyGeneric(op);
+  }
+
+  /**
+   * `mutate_many` for a source without a native one (memory, a host's own):
+   * validate the patch, read the rows in scope (by id, or by paging the
+   * filter), refuse the request when a patch would take one of them out of
+   * the scope or the filter reaches more than `limit`, then `mutate` each.
+   * Everything that can be refused is refused before the first write; there
+   * is no transaction, so a source failing midway leaves the rows before it
+   * changed.
+   */
+  private async mutateManyGeneric(req: SourceMutateMany): Promise<MutateManyResult> {
+    const schema = await this.schema();
+    const patch = req.row ?? {};
+    if (req.op === "update") assertValidRow(schema, patch, "patch");
+    const failed: MutateManyFailure[] = [];
+    let targets: Row[];
+    if (req.ids) {
+      targets = [];
+      for (const id of req.ids) {
+        try {
+          targets.push(await this.readInScope(id));
+        } catch (err) {
+          if (!isUdcError(err) || err.code !== "not_found") throw err;
+          failed.push(notFoundFailure(id));
+        }
+      }
+    } else {
+      targets = await this.allMatching(req.filter, new Set(req.except_ids ?? []), req.limit);
+    }
+    if (req.op === "update" && this.rowScope) {
+      for (const row of targets) {
+        if (!(await this.inScope({ ...row, ...patch }))) throw outOfScope(this.collection.name);
+      }
+    }
+    let updated = 0;
+    for (const row of targets) {
+      const id = row.__meta.id;
+      try {
+        await this.source.mutate(
+          req.op === "update" ? { op: "update", id, row: patch } : { op: "delete", id },
+          this.sctx,
+        );
+        updated += 1;
+      } catch (err) {
+        // Gone since it was read: reported like an id that was never there.
+        if (!isUdcError(err) || err.code !== "not_found") throw err;
+        if (req.ids) failed.push(notFoundFailure(id));
+      }
+    }
+    return { updated, failed };
+  }
+
+  /** Every row in scope that `filter` matches, minus `except`; more than `limit` is refused. */
+  private async allMatching(
+    filter: FilterNode | undefined,
+    except: ReadonlySet<string>,
+    limit: number,
+  ): Promise<Row[]> {
+    const where = this.native ? filter : andFilters(this.rowScope, filter);
+    const byCursor = this.source.capabilities.paging?.includes("offset") === false;
+    const out: Row[] = [];
+    let offset = 0;
+    let cursor: string | null = null;
+    for (;;) {
+      const page = byCursor
+        ? { limit: MAX_PAGE_LIMIT, ...(cursor === null ? {} : { cursor }) }
+        : { limit: MAX_PAGE_LIMIT, offset };
+      const res = await this.source.list({ filter: where, page }, this.sctx);
+      const rows = this.native ? res.rows : await this.onlyInScope(res.rows);
+      for (const row of rows) {
+        if (except.has(row.__meta.id)) continue;
+        out.push(row);
+        if (out.length > limit) throw tooManyRows(this.collection.name, limit, "filter");
+      }
+      offset += res.rows.length;
+      cursor = res.next_cursor;
+      const more = byCursor ? cursor !== null : res.rows.length === MAX_PAGE_LIMIT;
+      if (!more || res.rows.length === 0) return out;
+    }
   }
 
   async reindex(req: SourceReindex): Promise<number> {

@@ -25,8 +25,8 @@ function messageId(header: string | string[] | undefined): string {
 }
 
 /** The documented response of one action: its ok payload or the error payload, always HTTP 200. */
-function envelopeDoc(action: string) {
-  const ok = isActionName(action) ? ACTIONS[action].response : z.unknown();
+function envelopeDoc(action: string, response: z.ZodType | undefined) {
+  const ok = response ?? (isActionName(action) ? ACTIONS[action].response : z.unknown());
   return z
     .object({
       kind: z.string().describe(`udc.${action}.ok | udc.${action}.err`),
@@ -192,7 +192,7 @@ export async function udcPlugin(app: FastifyInstance, opts: UdcPluginOptions): P
           operationId: action,
           body: dispatcher.schemaOf(action),
           headers: z.object({ [MESSAGE_ID_HEADER]: z.string().optional() }),
-          response: { 200: envelopeDoc(action) },
+          response: { 200: envelopeDoc(action, dispatcher.responseOf(action)) },
         },
       },
       (request) => handle(action, request),
