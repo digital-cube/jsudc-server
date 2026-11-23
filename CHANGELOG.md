@@ -7,11 +7,33 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
-The write side of `sqlite_table` completed: `mutate_many`, the host's
-`onMutate` hook, and a second driver; and the search box answered by a
-`sqlite_table` with FTS5. Nothing changes for a Postgres host.
+## [0.8.0] - 2026-11-23
+
+The second SQLite set and `reindex` on `postgres_table`; released together
+with `@jsudc/core` 0.8.0 and `@jsudc/react` 0.8.0, and the `@jsudc/core` range
+is `^0.8.0`. Everything is an addition: a 0.7.0 host runs unchanged.
+
+1. The write side of `sqlite_table` completed: `mutate_many`, the host's
+   `onMutate` hook, and a second driver, `better-sqlite3`.
+2. The search box answered by a `sqlite_table` with FTS5.
+3. Several SQLite files behind one registry, and several `udcPlugin`
+   instances (vaults) in one app, each closed on its own.
+4. `SqliteDatabase.checkpoint()`, to copy a database file while the server
+   keeps it open.
+5. Writes other processes make to a SQLite file reach the change feed
+   (`PRAGMA data_version`).
+6. `reindex` on `postgres_table`, so a kanban board over a relational table
+   survives running out of order values.
 
 ### Added
+
+- Several SQLite files behind one registry (each `sqlite_table` names its
+  `database`; lookups and `row_link` across files are checked and resolved),
+  and several `udcPlugin` instances in one Fastify app, each with its own
+  registry, dispatcher, change feed and Swagger. See "Several databases,
+  several instances" in the README.
+- `ChangeFeed.closed`, and `ChangeSubscriber.end` (the stream route ends its
+  response through it).
 
 - `sqlite_table` serves `mutate_many` (`capabilities.mutate_many: true` when
   the source writes), as `postgres_table` does: one `BEGIN IMMEDIATE`
@@ -67,6 +89,12 @@ The write side of `sqlite_table` completed: `mutate_many`, the host's
 
 ### Changed
 
+- `ChangeFeed.close()` ends every open stream subscribed to the feed, drops
+  later notices, refuses a new subscription, and stops polling the files it
+  watched; `GET /udc/changes` answers 404 for a closed feed, so the client
+  stops reconnecting. Closing one vault's feed leaves every other feed of the
+  process serving. Before, a closed feed left its streams hanging on
+  heartbeats.
 - `sqlite_table` and `postgres_table` build their `reindex` statement with one
   shared function (`reindexUpdate`, `src/sources/sql-reindex.ts`); the SQLite
   statement is unchanged.
@@ -548,7 +576,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/digital-cube/jsudc-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/digital-cube/jsudc-server/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/digital-cube/jsudc-server/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...v0.5.0
