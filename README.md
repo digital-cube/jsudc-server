@@ -565,6 +565,77 @@ const audit: SqliteOnMutateHook<{ user: string }> = (ctx, change, tx) => {
 const notes = new SqliteTableSource({ db: vault, schema, table: "note", onMutate: audit });
 ```
 
+## Several databases, several instances
+
+**One vault, several SQLite files.** Each `sqlite_table` collection names its
+file in `source.yaml` (`database: boards`, `database: tickets`), and the host
+opens each file once and registers it under that name:
+
+```ts
+const boards = openNodeSqlite("/data/vault/boards.db", { name: "boards" });
+const tickets = openNodeSqlite("/data/vault/tickets.db", { name: "tickets" });
+const registry = loadRegistry("./collections", (asset, reg) =>
+  makeSource(asset, { registry: reg, sqlite: { boards, tickets } }),
+);
+```
+
+A lookup or a `row_link` from a collection in one file to a collection in
+another needs nothing more: `checkRegistryLinks` compares schemas, not
+files; the client fetches a lookup's labels with an ordinary `list` on the
+target (`lookupKeysFilter`), and a `row_link` opens the target with an `eq`
+condition, so neither is a join. Filtering and sorting by the lookup key
+work as on any column. Every file has its own write queue and lock: a write
+to a collection in `tickets.db` opens no transaction in `boards.db`, so a
+`transaction` that spans both files does not exist (each file commits on
+its own). Joins across files (`ATTACH`) are not supported.
+
+**One process, several vaults.** Register `udcPlugin` once per vault, each
+under its own prefix and with its own registry, dispatcher (`context`,
+`rowScope`, `access`), change feed and SQLite handles. The plugin keeps no
+module-level state: each registration has its own routes, error handler,
+`/healthz`, `GET /udc/changes` and Swagger (`/vault-a/docs` documents
+`/vault-a/udc/*` only; give each a `title`).
+
+```ts
+const app = Fastify();
+for (const vault of vaults) {
+  await app.register(
+    async (scope) => {
+      // A closed vault is gone: every route under its prefix answers 404.
+      scope.addHook("onRequest", async (_req, reply) => {
+        if (vault.closed) {
+          return reply.code(404).send({ code: "not_found", message: "no such vault" });
+        }
+      });
+      await scope.register(udcPlugin, {
+        dispatcher: vault.dispatcher, // createDispatcher(vault.registry, { rowScope, changes: vault.changes })
+        registry: vault.registry,
+        context: (req) => vault.contextOf(req),
+        swagger: { title: `vault ${vault.name}` },
+      });
+    },
+    { prefix: `/${vault.name}` },
+  );
+}
+```
+
+**Closing one vault** while the others keep serving. Fastify cannot remove
+routes from a running server, so the host stops routing to the vault, then
+closes what the vault owns:
+
+```ts
+vault.closed = true; // the onRequest guard above: new requests answer 404
+await vault.changes.close(); // ends this feed's open streams; the clients' reconnect gets 404
+for (const db of vault.databases) db.close(); // SqliteDatabase.close(): both connections
+```
+
+`ChangeFeed.close()` ends every stream subscribed to that feed and refuses
+new ones (`GET /udc/changes` answers 404 for a closed feed, and the client
+stops reconnecting), leaving every other vault's feed and streams alone.
+Close the SQLite handles last: a statement on a closed `SqliteDatabase`
+throws. Routing by host name instead of prefix is the host's own work
+(Fastify's `constraints: { host }`, or a proxy).
+
 ## The SQL compiler
 
 The compiler behind both Postgres sources is exported, so a host that writes a
@@ -1312,7 +1383,9 @@ action `list`), else 404; its row scope is fixed for the life of the stream.
 Then it sends a `retry:` hint (`retryMs`, default 3 s), a `ready` event, a
 `change` event per change the request may see, and a heartbeat comment every
 `heartbeatMs` (default 15 s). The listener is removed when the client goes
-away, and `app.close()` ends every open stream. There is **no replay**: a
+away, and `app.close()` ends every open stream (`changes.close()` ends the
+streams of that feed alone: see [Several databases, several
+instances](#several-databases-several-instances)). There is **no replay**: a
 change made while a client was disconnected is not sent later; the client
 refetches when it reconnects (`UdcClient.changes` reports `reconnected` for
 exactly that).

@@ -196,4 +196,36 @@ describe("ChangeFeed.notify", () => {
     expect(bus.size).toBe(0);
     await feed.close();
   });
+
+  it("close ends every open stream, drops later notices and refuses a new stream", async () => {
+    const bus = new MemoryChangeBus();
+    const log = { error: vi.fn() };
+    const feed = createChangeFeed({ bus, coalesce: false, log });
+    const got: ChangeEvent[] = [];
+    const ended = [
+      vi.fn(),
+      vi.fn(() => {
+        throw new Error("socket gone");
+      }),
+    ];
+    feed.subscribe({
+      scopes: new Map([["m", undefined]]),
+      send: (e) => got.push(e),
+      end: ended[0],
+    });
+    feed.subscribe({ scopes: new Map([["m", undefined]]), send: () => {}, end: ended[1] });
+    // One without `end` (a host's own subscriber) is dropped all the same.
+    feed.subscribe({ scopes: new Map([["m", undefined]]), send: () => {} });
+    expect(feed.closed).toBe(false);
+    await feed.close();
+    expect(feed.closed).toBe(true);
+    expect(ended[0]).toHaveBeenCalledOnce();
+    expect(ended[1]).toHaveBeenCalledOnce();
+    expect(log.error).toHaveBeenCalledWith(expect.anything(), expect.stringMatching(/ending/));
+    expect(feed.listenerCount).toBe(0);
+    await feed.notify("m");
+    expect(got).toEqual([]);
+    expect(bus.size).toBe(0);
+    expect(() => feed.subscribe({ scopes: new Map(), send: () => {} })).toThrow(/closed/);
+  });
 });
