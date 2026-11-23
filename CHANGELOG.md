@@ -7,6 +7,24 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `@jsudc/server/testing`: `openTestApp` opens a `:memory:` or temp-file
+  SQLite database through the wrapper, runs the host's DDL, registers the
+  given collections (a directory, or a function of the database) and answers
+  a ready `buildApp({ swagger: false })` with `call()` and `close()`. One
+  database per call, nothing shared; no test runner imported.
+- `npm run test:no-db` and a CI job `no database (vitest)`: every suite that
+  needs no database server (dispatcher, scope, change feed, memory,
+  filesystem, http_api, yaml_menu, the SQLite suites, the test kit), run with
+  no Postgres service and `pg` removed. `test:no-pg` also imports
+  `@jsudc/server/testing` from the packed tarball.
+
+### Fixed
+
+- `npm run test:sqlite` no longer needs Postgres: the root `globalSetup`
+  created the test database even when only the SQLite project ran.
+
 ## [0.8.0] - 2026-11-23
 
 The second SQLite set and `reindex` on `postgres_table`; released together

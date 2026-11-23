@@ -6,6 +6,34 @@ import { configDefaults, defineConfig } from "vitest/config";
 // rebuild; standalone, the installed package is used.
 const coreSrc = fileURLToPath(new URL("../udc-core/src/index.ts", import.meta.url));
 
+/**
+ * The suites that need no database server and never import `pg`: the dispatcher, the
+ * scope, the change feed, the memory, filesystem, http_api and yaml_menu sources, the
+ * registry, the HTTP plugin and the test kit. With `test/sqlite-table` they are what
+ * `npm run test:no-db` runs, and CI runs them with no Postgres service and `pg`
+ * uninstalled. A file here imports `test/common.ts`, never `test/helpers.ts`.
+ * (`row-scope` runs its memory backend there; its Postgres one in `udc-server`.)
+ */
+const NO_DB_SUITES = [
+  "test/changes-feed.test.ts",
+  "test/changes-route.test.ts",
+  "test/columns.test.ts",
+  "test/describe-columns.test.ts",
+  "test/dispatcher.test.ts",
+  "test/filesystem.test.ts",
+  "test/filterable.test.ts",
+  "test/host-action.test.ts",
+  "test/http-api-history.test.ts",
+  "test/http-api.test.ts",
+  "test/memory.test.ts",
+  "test/registry.test.ts",
+  "test/request-context.test.ts",
+  "test/schema-edit.test.ts",
+  "test/testing.test.ts",
+  "test/transport.test.ts",
+  "test/yaml-menu.test.ts",
+];
+
 /** The jsonb filter and paging suites, run a second time against `postgres_table`. */
 const TABLE_SUITES = [
   "test/pg-filter.test.ts",
@@ -62,6 +90,8 @@ export default defineConfig({
   },
   test: {
     root: fileURLToPath(new URL(".", import.meta.url)),
+    // Creates the Postgres test database, unless every project of the run is a no-database
+    // one (it reads the run's projects; `no-db` and `sqlite-table` are listed there).
     globalSetup: ["test/global-setup.ts"],
     // Every DB test file truncates the same tables: run files one at a time.
     fileParallelism: false,
@@ -77,7 +107,7 @@ export default defineConfig({
         test: {
           name: "udc-server",
           include: ["test/**/*.test.ts"],
-          exclude: [...configDefaults.exclude, "test/sqlite-table/**"],
+          exclude: [...configDefaults.exclude, "test/sqlite-table/**", ...NO_DB_SUITES],
           sequence: { groupOrder: 0 },
         },
       },
@@ -112,9 +142,21 @@ export default defineConfig({
         },
       },
       {
+        // No database server: not `extends: true`, and test/global-setup.ts skips the
+        // database when only no-database projects run. `npm run test:no-db` runs this project
+        // and `sqlite-table`.
+        resolve: { alias: existsSync(coreSrc) ? { "@jsudc/core": coreSrc } : {} },
+        test: {
+          name: "no-db",
+          root: fileURLToPath(new URL(".", import.meta.url)),
+          include: [...NO_DB_SUITES, "test/row-scope.test.ts"],
+          env: { UDC_TEST_NO_DB: "1" },
+          sequence: { groupOrder: 5 },
+        },
+      },
+      {
         // The `sqlite_table` source and the SQLite wrapper, on `:memory:` and temp files: no
-        // database server, so not `extends: true` (the root's globalSetup creates the
-        // Postgres test database). `npm run test:sqlite` runs this project alone.
+        // database server (see `no-db`). `npm run test:sqlite` runs this project alone.
         resolve: { alias: existsSync(coreSrc) ? { "@jsudc/core": coreSrc } : {} },
         test: {
           name: "sqlite-table",

@@ -1,6 +1,8 @@
 // Two request contexts (tenants `a` and `b`) over one `message` collection, held to
 // `tenant = <ctx.tenant>` by the dispatcher's `rowScope`: on postgres_jsonb (the scope in
-// the SQL) and on memory (the generic layer alone), through the HTTP plugin.
+// the SQL) and on memory (the generic layer alone), through the HTTP plugin. The
+// no-database project (`npm run test:no-db`, UDC_TEST_NO_DB=1) runs the memory backend
+// alone and never loads `pg`.
 import {
   type DescribeResponse,
   type FilterNode,
@@ -11,18 +13,14 @@ import {
   unauthenticatedError,
   ViewConfigSchema,
 } from "@jsudc/core";
-import { sql } from "drizzle-orm";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
-import { createCollectionTableSql } from "../src/db/schema.js";
 import type { Described } from "../src/describe.js";
 import { createDispatcher } from "../src/dispatcher.js";
 import { CollectionRegistry } from "../src/registry.js";
 import { MemorySource } from "../src/sources/memory.js";
-import { PostgresJsonbSource } from "../src/sources/postgres-jsonb.js";
 import type { Source } from "../src/sources/source.js";
-import { useTestDb } from "./helpers.js";
 
 const schemaJson: SchemaDocInput = {
   version: "v1",
@@ -116,16 +114,6 @@ function rowScope(ctx: Ctx, collection: string): FilterNode | undefined {
     : { and: [tenant, { field: "size", op: "lt", value: ctx.maxSize }] };
 }
 
-const { db } = useTestDb();
-
-async function resetPg(): Promise<void> {
-  await db.execute(sql`truncate table message, udc_schema_revisions restart identity`);
-  await db.execute(sql`
-    insert into message (id, data)
-    select (value->>'id')::uuid, value - 'id'
-    from jsonb_array_elements(${JSON.stringify(ROWS)}::jsonb)`);
-}
-
 const memoryRows = () => ROWS.map(({ id, ...data }) => ({ __meta: { id }, ...data }));
 
 interface Backend {
@@ -134,15 +122,34 @@ interface Backend {
   make(): Promise<{ message: Source; shown: Source }>;
 }
 
-const BACKENDS: Backend[] = [
-  {
+/** The Postgres backend: its modules (and `pg`) are loaded only when a database is there. */
+async function postgresBackend(): Promise<Backend> {
+  const { sql } = await import("drizzle-orm");
+  const { createCollectionTableSql } = await import("../src/db/schema.js");
+  const { PostgresJsonbSource } = await import("../src/sources/postgres-jsonb.js");
+  const { useTestDb } = await import("./helpers.js");
+  const { db } = useTestDb();
+  let created = false;
+  return {
     name: "postgres_jsonb",
     async make() {
-      await resetPg();
+      if (!created) {
+        await db.execute(sql.raw(createCollectionTableSql("message")));
+        created = true;
+      }
+      await db.execute(sql`truncate table message, udc_schema_revisions restart identity`);
+      await db.execute(sql`
+        insert into message (id, data)
+        select (value->>'id')::uuid, value - 'id'
+        from jsonb_array_elements(${JSON.stringify(ROWS)}::jsonb)`);
       const pg = () => new PostgresJsonbSource({ db, table: "message", initialSchema: schema });
       return { message: pg(), shown: pg() };
     },
-  },
+  };
+}
+
+const BACKENDS: Backend[] = [
+  ...(process.env.UDC_TEST_NO_DB === "1" ? [] : [await postgresBackend()]),
   {
     name: "memory",
     async make() {
@@ -153,10 +160,6 @@ const BACKENDS: Backend[] = [
     },
   },
 ];
-
-beforeAll(async () => {
-  await db.execute(sql.raw(createCollectionTableSql("message")));
-});
 
 describe.each(BACKENDS)("row scope on $name", (backend) => {
   let app: FastifyInstance;

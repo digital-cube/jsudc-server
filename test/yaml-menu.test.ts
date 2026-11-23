@@ -11,16 +11,20 @@ import {
   type Row,
   type SourceReadResponse,
 } from "@jsudc/core";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createDispatcher } from "../src/dispatcher.js";
 import { CollectionRegistry, loadRegistry, readCollectionAssets } from "../src/registry.js";
 import { makeSource } from "../src/sources/factory.js";
 import { MemorySource } from "../src/sources/memory.js";
+import { SqliteTableSource } from "../src/sources/sqlite-table.js";
 import { type MenuCollection, YamlMenuSource } from "../src/sources/yaml-menu.js";
-import { COLLECTIONS_DIR, companiesSchema, companiesSource, useTestDb } from "./helpers.js";
+import { openNodeSqlite } from "../src/sqlite-node.js";
+import { COLLECTIONS_DIR, companiesSchema } from "./common.js";
 
-// A Postgres collection beside the menu, for the unsupported_op case (no query is run).
-const { db } = useTestDb();
+// A SQL collection beside the menu, for the unsupported_op case (no query is run). SQLite
+// in memory, so this file needs no database server and no `pg` (`npm run test:no-db`).
+const sqlite = openNodeSqlite(":memory:");
+afterAll(() => sqlite.close());
 const FIXTURE = join(import.meta.dirname, "fixtures", "menu");
 const sha1 = (path: string) => createHash("sha1").update(path).digest("hex");
 
@@ -293,7 +297,11 @@ describe("yaml_menu through the registry and the dispatcher", () => {
       source: new MemorySource({ schema: companiesSchema }),
       view,
     });
-    registry.register({ name: "pg", source: companiesSource(db), view });
+    registry.register({
+      name: "sql",
+      source: new SqliteTableSource({ db: sqlite, schema: companiesSchema, table: "companies" }),
+      view,
+    });
     const dispatcher = createDispatcher(registry, { log: { error: vi.fn() } });
     const call = async (action: string, payload: unknown) =>
       dispatcher.dispatch({ kind: `udc.${action}`, id: "t", payload });
@@ -328,13 +336,13 @@ describe("yaml_menu through the registry and the dispatcher", () => {
     const list = await call("list", { collection: "navi", page: { limit: 100 } });
     const rows = (list.payload as ListResponse).rows;
     const dynamic = rows.filter((r) => r.is_dynamic).map((r) => r.code);
-    // DATABASE lists alpha and pg; EVERYTHING lists every collection, the menu too, in registry order.
+    // DATABASE lists alpha and sql; EVERYTHING lists every collection, the menu too, in registry order.
     expect(dynamic).toEqual([
       "COLLECTION_ALPHA",
-      "COLLECTION_PG",
+      "COLLECTION_SQL",
       "COLLECTION_NAVI",
       "COLLECTION_ALPHA",
-      "COLLECTION_PG",
+      "COLLECTION_SQL",
     ]);
 
     const read = await call("source.read", { collection: "navi" });
@@ -343,7 +351,7 @@ describe("yaml_menu through the registry and the dispatcher", () => {
     expect((read.payload as SourceReadResponse).text).toContain("udc:collections");
   });
 
-  it.each(["pg", "alpha"])(
+  it.each(["sql", "alpha"])(
     "source.read on %s (no source_yaml) answers unsupported_op",
     async (collection) => {
       const { call } = serve();

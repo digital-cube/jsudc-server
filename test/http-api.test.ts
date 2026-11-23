@@ -10,7 +10,7 @@ import {
   interpolateHeaders,
   mapItems,
 } from "../src/sources/http-api.js";
-import { COLLECTIONS_DIR, ids, rejectsWith } from "./helpers.js";
+import { COLLECTIONS_DIR, ids, rejectsWith } from "./common.js";
 
 const FIXTURES = join(import.meta.dirname, "fixtures", "http");
 

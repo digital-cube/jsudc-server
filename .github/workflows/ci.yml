@@ -54,6 +54,26 @@ jobs:
       - run: npm run test:cov
       - run: npm run build
 
+  no-db:
+    # The suites that need no database server (vitest projects `no-db` and `sqlite-table`:
+    # the dispatcher, scope, change feed, memory, filesystem, http_api, yaml_menu, the
+    # SQLite source and wrapper, the test kit). No Postgres service on purpose, and `pg` is
+    # removed after `npm ci`: a file of these projects that imports it fails here.
+    name: no database (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Remove pg
+        run: |
+          rm -rf node_modules/pg node_modules/@types/pg
+          ! node -e "require.resolve('pg')" 2>/dev/null
+      - run: npm run test:no-db
+
   no-pg:
     # The package as a host without Postgres installs it: npm pack, npm install of the
     # tarball in an empty directory (optional peers such as pg stay out), then the root

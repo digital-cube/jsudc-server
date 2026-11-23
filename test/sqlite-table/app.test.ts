@@ -1,6 +1,7 @@
 // End to end: a collection directory whose source.yaml says `kind: sqlite_table`, made by
 // the root entry's makeSource over a registered SqliteDatabase, served by
 // buildApp({ swagger: false }) with a row scope; describe, list and mutate over HTTP.
+// The database file, the DDL and the app come from the test kit (`@jsudc/server/testing`).
 // (test/no-pg/run.mjs does the same from the packed tarball, in an install without pg.)
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -8,37 +9,20 @@ import { unauthenticatedError } from "@jsudc/core";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  buildApp,
-  createDispatcher,
   loadRegistry,
   makeSource,
   type SqliteDatabase,
   sqliteVersionTriggerSql,
 } from "../../src/index.js";
-import { openNodeSqlite } from "../../src/sqlite.js";
+import { openTestApp, type TestApp } from "../../src/testing.js";
 import { tempDir } from "./helpers.js";
 
+let kit: TestApp;
 let app: FastifyInstance;
 let vault: SqliteDatabase;
 
 beforeAll(async () => {
   const dir = tempDir();
-  vault = openNodeSqlite(join(dir, "vault.db"), { name: "vault" });
-  await vault.exec(`
-    CREATE TABLE note (
-      id TEXT PRIMARY KEY,
-      owner TEXT NOT NULL,
-      title TEXT NOT NULL,
-      body_text TEXT,
-      pinned INTEGER NOT NULL DEFAULT 0,
-      tags TEXT,
-      version INTEGER NOT NULL DEFAULT 1);
-    ${sqliteVersionTriggerSql({ table: "note", versionColumn: "version" })}
-    INSERT INTO note (id, owner, title, pinned, tags) VALUES
-      ('0b6f9d4e-0000-4000-8000-000000000001', 'ana', 'Ana''s first', 1, '["x"]'),
-      ('0b6f9d4e-0000-4000-8000-000000000002', 'ana', 'Ana''s second', 0, NULL),
-      ('0b6f9d4e-0000-4000-8000-000000000003', 'bob', 'Bob''s', 0, '[]');`);
-
   const notes = join(dir, "collections", "notes");
   mkdirSync(notes, { recursive: true });
   writeFileSync(
@@ -72,26 +56,36 @@ beforeAll(async () => {
     ].join("\n"),
   );
 
-  const registry = loadRegistry(join(dir, "collections"), (asset, reg) =>
-    makeSource(asset, { registry: reg, sqlite: { vault } }),
-  );
-  const dispatcher = createDispatcher<{ user: string }>(registry, {
-    log: { error: (...a: unknown[]) => console.error(...a) },
-    rowScope: (ctx) => ({ field: "owner", op: "eq", value: ctx.user }),
+  kit = await openTestApp<{ user: string }>({
+    where: "file",
+    database: "vault",
+    ddl: `
+      CREATE TABLE note (
+        id TEXT PRIMARY KEY,
+        owner TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body_text TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        tags TEXT,
+        version INTEGER NOT NULL DEFAULT 1);
+      ${sqliteVersionTriggerSql({ table: "note", versionColumn: "version" })}
+      INSERT INTO note (id, owner, title, pinned, tags) VALUES
+        ('0b6f9d4e-0000-4000-8000-000000000001', 'ana', 'Ana''s first', 1, '["x"]'),
+        ('0b6f9d4e-0000-4000-8000-000000000002', 'ana', 'Ana''s second', 0, NULL),
+        ('0b6f9d4e-0000-4000-8000-000000000003', 'bob', 'Bob''s', 0, '[]');`,
+    collections: join(dir, "collections"),
+    dispatcher: { rowScope: (ctx) => ({ field: "owner", op: "eq", value: ctx.user }) },
+    context: (req: FastifyRequest) => {
+      const user = req.headers["x-user"];
+      if (typeof user !== "string") throw unauthenticatedError();
+      return { user };
+    },
   });
-  const context = (req: FastifyRequest) => {
-    const user = req.headers["x-user"];
-    if (typeof user !== "string") throw unauthenticatedError();
-    return { user };
-  };
-  app = await buildApp({ dispatcher, registry, context, swagger: false });
-  await app.ready();
+  app = kit.app;
+  vault = kit.db;
 });
 
-afterAll(async () => {
-  await app?.close();
-  vault?.close();
-});
+afterAll(() => kit?.close());
 
 async function post(user: string, action: string, payload: object) {
   const res = await app.inject({

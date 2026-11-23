@@ -51,6 +51,10 @@
       "types": "./dist/better-sqlite3.d.ts",
       "default": "./dist/better-sqlite3.js"
     },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -71,6 +75,7 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:sqlite": "vitest run --project sqlite-table",
+    "test:no-db": "vitest run --project no-db --project sqlite-table",
     "test:no-pg": "node test/no-pg/run.mjs"
   },
   "dependencies": {
