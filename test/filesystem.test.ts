@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type FilterNode, SchemaDocSchema } from "@jsudc/core";
 import { afterAll, describe, expect, it } from "vitest";
 import { FilesystemSource, normalizeRelPath, takePathSelector } from "../src/sources/filesystem.js";
-import { COLLECTIONS_DIR, rejectsWith } from "./helpers.js";
+import { COLLECTIONS_DIR, rejectsWith } from "./common.js";
 
 const schema = SchemaDocSchema.parse(
   JSON.parse(readFileSync(join(COLLECTIONS_DIR, "files", "schema.json"), "utf8")),

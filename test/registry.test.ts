@@ -8,7 +8,7 @@ import {
   viewDefaultSortProblems,
 } from "../src/registry.js";
 import { MemorySource } from "../src/sources/memory.js";
-import { COLLECTIONS_DIR } from "./helpers.js";
+import { COLLECTIONS_DIR } from "./common.js";
 
 const fixtures = (name: string) => join(import.meta.dirname, "fixtures", name);
 

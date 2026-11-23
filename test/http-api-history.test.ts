@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { buildDescribe } from "../src/describe.js";
 import { readCollectionAssets } from "../src/registry.js";
 import { type FetchLike, HttpApiSource, mapItems } from "../src/sources/http-api.js";
-import { COLLECTIONS_DIR, ids } from "./helpers.js";
+import { COLLECTIONS_DIR, ids } from "./common.js";
 
 // Any parsed view: the history test only swaps its columns.
 const quakes = readCollectionAssets(COLLECTIONS_DIR).find((a) => a.name === "quakes");

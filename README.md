@@ -1782,6 +1782,10 @@ From `@jsudc/server/better-sqlite3` (needs the optional peer `better-sqlite3`):
 `BetterSqliteDatabase` and `BetterSqliteStatement` — the same with
 `better-sqlite3` — and the SQLite exports of the root entry again.
 
+From `@jsudc/server/testing` (no database server, no test runner imported):
+`openTestApp`, `OpenTestAppOptions`, `TestApp`, `TestEnvelope` — see
+[Testing a host](#testing-a-host).
+
 From `@jsudc/server/postgres` (needs `pg`):
 
 | Export                                                                                                                                       | What                                                                                  |
@@ -1797,6 +1801,50 @@ From `@jsudc/server/postgres` (needs `pg`):
 | `PostgresTableSearch`                                                                                                                        | `search` of a `PostgresTableSource`                                                   |
 | `createPostgresChangeBus`, `PostgresChangeBus`, `PostgresChangeBusOptions`, `encodeNotice`, `DEFAULT_CHANGE_CHANNEL`, `NOTIFY_PAYLOAD_LIMIT` | the `LISTEN` / `NOTIFY` bus                                                           |
 | `jsonbResolver`, `columnResolver`, `ColumnResolverOptions`                                                                                   | the resolvers of the two Postgres sources (see [The SQL compiler](#the-sql-compiler)) |
+
+## Testing a host
+
+`@jsudc/server/testing` gives a host's own tests one SQLite database and one
+ready server per call, nothing shared between two calls. `openTestApp` opens
+`:memory:` (or `test.db` in a temp directory of its own, `where: "file"`)
+through the wrapper, runs your DDL, makes your collections over it and answers
+a `buildApp({ swagger: false })` that is already `ready()`:
+
+```ts
+import { readFileSync } from "node:fs";
+import { openTestApp, type TestApp } from "@jsudc/server/testing";
+import { afterAll, beforeAll, expect, it } from "vitest";
+
+let t: TestApp;
+beforeAll(async () => {
+  t = await openTestApp<{ user: string }>({
+    collections: "collections", // your collection directories, or (db) => [{ name, source, view }]
+    database: "main", // the name your source.yaml's `database:` gives
+    ddl: readFileSync("schema.sql", "utf8"), // a string, or a list run in order
+    dispatcher: { rowScope: (ctx) => ({ field: "owner", op: "eq", value: ctx.user }) },
+    context: (req) => ({ user: String(req.headers["x-user"]) }),
+    changes: true, // GET /udc/changes is served
+  });
+});
+afterAll(() => t.close());
+
+it("lists my tasks", async () => {
+  const res = await t.call("list", { collection: "tasks" }, { "x-user": "ana" });
+  expect(res.kind).toBe("udc.list.ok");
+});
+```
+
+`t.db` is the `SqliteDatabase` the collections use, for your own SQL;
+`t.app` is the Fastify instance (`inject`, or `listen` for a real client);
+`t.call(action, payload, headers)` posts one action and answers its envelope;
+`t.close()` closes the app, the feed and the database and removes the temp
+directory. `open: openBetterSqlite` uses that driver instead of `node:sqlite`.
+
+Left out on purpose: Postgres (a test database per file is the host's
+business), fixtures and seed files beyond your DDL, a client
+(`UdcClient` from `@jsudc/core/client` over `app.listen` does that), and any
+test runner API — call it from `beforeAll` or `beforeEach` of whichever runner
+you use.
 
 ## Develop
 
@@ -1816,7 +1864,14 @@ that copies the rows into a table with real typed columns and serves it through
 `SqliteTableSource` (`test/sqlite-double/`, the rows copied into `node:sqlite`
 `:memory:`), and `sqlite-table` runs `test/sqlite-table/` — the SQLite source
 and wrapper on `:memory:` and on temp files — without any database server
-(`npm run test:sqlite`). Its write suites (`mutate-many`, `mutate-many-hook`,
+(`npm run test:sqlite`). The `no-db` project runs the files that need neither a
+database server nor `pg` — the dispatcher, the scope, the change feed, the
+memory, filesystem, http_api and yaml_menu sources, the registry, the HTTP
+plugin and the test kit (`NO_DB_SUITES` in `vitest.config.ts`; they import
+`test/common.ts`, never `test/helpers.ts`) — and `row-scope` on its memory
+backend. `npm run test:no-db` runs it with `sqlite-table`: `test/global-setup.ts`
+then connects to nothing, and CI runs it with no Postgres service and `pg`
+removed. The `sqlite-table` write suites (`mutate-many`, `mutate-many-hook`,
 `on-mutate`, `changes-writes`) run once per driver: `node:sqlite`, and
 `better-sqlite3` when it is installed and its native addon loads (a dev
 dependency here; the adapter's own suite is skipped otherwise).
@@ -1828,6 +1883,7 @@ npm run lint        # Biome
 npm test            # Vitest, one file at a time (they share the database)
 npm run test:cov    # coverage, thresholds 80%
 npm run test:sqlite # the SQLite suites alone: no database server needed
+npm run test:no-db  # everything that needs no database server and no pg
 npm run test:no-pg  # npm pack, install in an empty dir without pg, serve memory and sqlite_table
 npm run build       # tsc -> dist (ESM + .d.ts)
 ```

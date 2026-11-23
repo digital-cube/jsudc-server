@@ -8,7 +8,8 @@
 // `describe`, `list` and `mutate` under a row scope. `@jsudc/server/postgres`
 // must fail on the missing `pg` and nothing else. `@jsudc/server/better-sqlite3`
 // must import without `better-sqlite3`, and `openBetterSqlite` say it is
-// missing. No database server is needed.
+// missing. `@jsudc/server/testing`'s `openTestApp` must serve the host's
+// collections over its own `:memory:` database. No database server is needed.
 //
 // Needs the npm registry (or a warm npm cache) for the peers. TMPDIR moves
 // the temp directory. NO_PG_CORE_DIR=<a @jsudc/core checkout> installs that
@@ -190,7 +191,21 @@ try {
   better.importError = err.message;
 }
 await app.close();
-console.log(JSON.stringify({ describe, list, sqlite, postgres, better }));
+// The test kit: its own :memory: database, the host's collection directory over it.
+const { openTestApp } = await import("@jsudc/server/testing");
+const kit = await openTestApp({
+  collections: "./collections",
+  database: "vault",
+  ddl: "CREATE TABLE note (id TEXT PRIMARY KEY, owner TEXT NOT NULL, title TEXT NOT NULL," +
+    " done INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1);" +
+    " INSERT INTO note (id, owner, title) VALUES ('7d1e0c2a-0000-4000-8000-000000000009', 'kit', 'In the kit');",
+});
+const testing = {
+  path: kit.path,
+  list: await kit.call("list", { collection: "vault_notes" }),
+};
+await kit.close();
+console.log(JSON.stringify({ describe, list, sqlite, postgres, better, testing }));
 `,
   );
   const out = JSON.parse(run(process.execPath, ["main.mjs"], host).trim().split("\n").pop());
@@ -223,10 +238,18 @@ console.log(JSON.stringify({ describe, list, sqlite, postgres, better }));
   assert.equal(out.better.imported, true, JSON.stringify(out.better));
   assert.match(out.better.message ?? "", /npm install better-sqlite3/, JSON.stringify(out.better));
 
+  assert.equal(out.testing.path, ":memory:");
+  assert.equal(out.testing.list.kind, "udc.list.ok", JSON.stringify(out.testing.list));
+  assert.deepEqual(
+    out.testing.list.payload.rows.map((r) => r.title),
+    ["In the kit"],
+  );
+
   console.log("ok: @jsudc/server without pg — root entry, memory registry, describe and list");
   console.log("ok: sqlite_table over node:sqlite — describe, list, mutate under a row scope");
   console.log("ok: @jsudc/server/postgres without pg fails on the missing 'pg' only");
   console.log("ok: @jsudc/server/better-sqlite3 imports without it; openBetterSqlite names it");
+  console.log("ok: @jsudc/server/testing — openTestApp over the host's collections, :memory:");
 } finally {
   if (keep) console.log(`kept ${work}`);
   else rmSync(work, { recursive: true, force: true });

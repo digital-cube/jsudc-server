@@ -22,7 +22,7 @@ import { CollectionRegistry } from "../src/registry.js";
 import { FilesystemSource } from "../src/sources/filesystem.js";
 import { MemorySource } from "../src/sources/memory.js";
 import type { SourceContext, SourceListRequest } from "../src/sources/source.js";
-import { COLLECTIONS_DIR } from "./helpers.js";
+import { COLLECTIONS_DIR } from "./common.js";
 
 interface Ctx {
   tenant: string;
