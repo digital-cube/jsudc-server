@@ -121,6 +121,11 @@ export interface ChangeSubscriber {
   /** Collection → the subscriber's row scope on it (`undefined`: none). */
   scopes: ReadonlyMap<string, FilterNode | undefined>;
   send(event: ChangeEvent): void;
+  /**
+   * The feed was closed (`ChangeFeed.close`): end the stream. The SSE route
+   * ends its response, so the client reconnects and finds the vault gone.
+   */
+  end?(): void;
 }
 
 const DEFAULT_HEARTBEAT_MS = 15_000;
@@ -269,6 +274,7 @@ export class ChangeFeed {
   private scope: RowScopeOptions = {};
   private readonly subscribers = new Set<ChangeSubscriber>();
   private unsubscribeBus: (() => void) | undefined;
+  private isClosed = false;
 
   constructor(opts: ChangeFeedOptions = {}) {
     this.bus = opts.bus ?? new MemoryChangeBus();
@@ -292,6 +298,11 @@ export class ChangeFeed {
   attach(scope: RowScopeOptions, log?: ChangeFeedOptions["log"]): void {
     this.scope = scope;
     this.log ??= log;
+  }
+
+  /** Whether `close` was called: nothing is delivered, no stream may subscribe. */
+  get closed(): boolean {
+    return this.isClosed;
   }
 
   /** How many streams of this process are subscribed. */
@@ -402,6 +413,8 @@ export class ChangeFeed {
       ...(ids ? { ids } : {}),
       ...(match ? { match } : {}),
     };
+    // A write that finished after the feed closed (its vault is shutting down): told nobody.
+    if (this.isClosed) return;
     this.ensureListening();
     try {
       await this.bus.publish(capped);
@@ -415,12 +428,17 @@ export class ChangeFeed {
    * the scope rule, ids capped, bursts coalesced, before `send`.
    */
   subscribe(sub: ChangeSubscriber): () => void {
+    if (this.isClosed) throw new Error("ChangeFeed: the feed is closed");
     const coalescer = this.coalesce
       ? new Coalescer((e) => sub.send(e), this.coalesce.windowMs, this.coalesce.maxEvents)
       : undefined;
     const entry: ChangeSubscriber = {
       scopes: sub.scopes,
       send: (e) => (coalescer ? coalescer.push(e) : sub.send(e)),
+      end: () => {
+        coalescer?.close();
+        sub.end?.();
+      },
     };
     this.subscribers.add(entry);
     this.ensureListening();
@@ -447,8 +465,24 @@ export class ChangeFeed {
     }
   }
 
-  /** Stop listening to the bus and close it. Open streams end with their server. */
+  /**
+   * Close the feed: end every open stream subscribed to it (the SSE route
+   * ends its response), stop listening to the bus and close it. Closing one
+   * vault's feed leaves every other feed of the process serving. Later
+   * notices are dropped; a new stream is refused. Idempotent.
+   */
   async close(): Promise<void> {
+    if (this.isClosed) return;
+    this.isClosed = true;
+    const subs = [...this.subscribers];
+    this.subscribers.clear();
+    for (const sub of subs) {
+      try {
+        sub.end?.();
+      } catch (err) {
+        this.log?.error({ err }, "udc change feed: ending a stream failed");
+      }
+    }
     this.unsubscribeBus?.();
     this.unsubscribeBus = undefined;
     await this.bus.close?.();

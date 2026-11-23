@@ -48,7 +48,9 @@ function collectionsOf(query: unknown): string[] {
  * fixed for the stream. Then: a `retry:` hint, a `ready` event, a `change`
  * event per change this request may see, a heartbeat comment every
  * `feed.heartbeatMs`. The listener is removed when the client goes away and
- * every stream is ended when the server closes. No replay: a client
+ * every stream is ended when the server closes, or when the feed is closed
+ * (`ChangeFeed.close`: one vault of several closing; a new stream is then a
+ * 404). No replay: a client
  * refetches after it reconnects.
  */
 export function registerChangesRoute(
@@ -88,6 +90,10 @@ export function registerChangesRoute(
         return refuse(reply, 500, { code: "internal", message: "internal error" });
       }
     }
+    // A closed feed (its vault was closed): the collections are not served here any more.
+    if (feed.closed) {
+      return refuse(reply, 404, { code: "not_found", message: "the change feed is closed" });
+    }
     const scopes = new Map<string, FilterNode | undefined>();
     for (const name of names) {
       try {
@@ -121,6 +127,9 @@ export function registerChangesRoute(
       scopes,
       send: (event: ChangeEvent) =>
         write(`event: ${CHANGE_EVENT}\ndata: ${JSON.stringify(event)}\n\n`),
+      end: () => {
+        if (!res.writableEnded) res.end();
+      },
     });
     const heartbeat = setInterval(() => write(": heartbeat\n\n"), feed.heartbeatMs);
     heartbeat.unref?.();
