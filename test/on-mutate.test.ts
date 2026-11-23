@@ -13,12 +13,8 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { connect } from "../src/db/client.js";
 import { createDispatcher } from "../src/dispatcher.js";
-import {
-  type OnMutateHook,
-  PostgresJsonbSource,
-  PostgresTableSource,
-  type RowChange,
-} from "../src/index.js";
+import type { RowChange } from "../src/index.js";
+import { type OnMutateHook, PostgresJsonbSource, PostgresTableSource } from "../src/postgres.js";
 import { CollectionRegistry } from "../src/registry.js";
 import type { Source, SourceContext } from "../src/sources/source.js";
 import {

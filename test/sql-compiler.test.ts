@@ -14,11 +14,11 @@ import {
   escapeLike,
   type FieldResolver,
   idParam,
-  jsonbResolver,
   orderBy,
   sortKeyColumns,
   sqlCastFor,
 } from "../src/index.js";
+import { columnResolver, jsonbResolver } from "../src/postgres.js";
 import { rejectsWith, useTestDb } from "./helpers.js";
 
 const { db } = useTestDb();
@@ -194,6 +194,53 @@ describe("the jsonb resolver", () => {
     expect(text(orderBy(terms))).toBe("((data->>'age')::numeric) DESC NULLS LAST, id ASC");
     expect(text(cursorPredicate(terms, ["5"], "00000000-0000-0000-0000-000000000000"))).toBe(
       "(((((data->>'age')::numeric), $1::uuid) < ($2::numeric, id)) OR ((((data->>'age')::numeric) IS NULL)))",
+    );
+  });
+});
+
+// README "The SQL the host must run": the three migrations are postgres_jsonb's. The
+// column resolver postgres_table compiles with casts its own typed columns: no udc_date,
+// no udc_timestamptz (0001), and nothing of udc_schema_revisions (0000) or of the jsonb
+// expression indexes (0002) is on its path.
+describe("the column resolver (postgres_table)", () => {
+  const d = new PgDialect();
+  const text = (x: SQL) => d.sqlToQuery(x).sql;
+  const timed = SchemaDocSchema.parse({
+    version: "v1",
+    fields: { born: { type: "date" }, at: { type: "datetime" }, name: { type: "string" } },
+  });
+  const columns = columnResolver({
+    fields: { born: sql`born`, at: sql`at`, name: sql`name` },
+    id: sql`pk`,
+    idType: "integer",
+  });
+
+  it("compiles date and datetime without the library's SQL functions", () => {
+    const filter: FilterNode = {
+      and: [
+        { field: "born", op: "gte", value: "2020-01-01" },
+        { field: "at", op: "lt", value: "2026-01-01T00:00:00Z" },
+        { field: "name", op: "contains", value: "a" },
+      ],
+    };
+    const terms = compileSort(
+      [
+        { field: "born", dir: "asc" },
+        { field: "at", dir: "desc" },
+      ],
+      timed,
+      columns,
+    );
+    const all = [
+      text(compileFilter(filter, timed, columns)),
+      text(orderBy(terms, columns)),
+      text(cursorPredicate(terms, ["2020-01-01", "2026-01-01T00:00:00Z"], "7", columns)),
+    ].join("\n");
+    expect(all).not.toMatch(/udc_/);
+    expect(all).toContain("(born) >= $1::date");
+    // The jsonb resolver, for contrast, needs migration 0001.
+    expect(text(compileFilter({ field: "born", op: "gte", value: "2020-01-01" }, timed))).toContain(
+      "udc_date(",
     );
   });
 });

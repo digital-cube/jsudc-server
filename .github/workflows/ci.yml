@@ -53,3 +53,18 @@ jobs:
       - run: npm run lint
       - run: npm run test:cov
       - run: npm run build
+
+  no-pg:
+    # The package as a host without Postgres installs it: npm pack, npm install of the
+    # tarball in an empty directory (optional peers such as pg stay out), then the root
+    # entry serves a memory collection. No database service on purpose.
+    name: no pg (npm pack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run test:no-pg

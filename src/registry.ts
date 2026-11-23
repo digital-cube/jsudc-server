@@ -25,7 +25,7 @@ import {
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { assertRegistryLinks } from "./links.js";
-import { assertJsonbSchema } from "./schema-store.js";
+import { assertJsonbSchema } from "./schema-rules.js";
 import type { Source } from "./sources/source.js";
 
 export interface Collection {

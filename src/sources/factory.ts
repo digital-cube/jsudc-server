@@ -1,13 +1,10 @@
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { sourceGroup } from "@jsudc/core";
-import type { Db } from "../db/client.js";
 import type { CollectionAsset, CollectionRegistry } from "../registry.js";
 import { FilesystemSource } from "./filesystem.js";
 import { type Env, type FetchLike, HttpApiSource, type SourceLog } from "./http-api.js";
 import { MemorySource } from "./memory.js";
-import { PostgresJsonbSource } from "./postgres-jsonb.js";
-import { PostgresTableSource } from "./postgres-table.js";
 import type { Source } from "./source.js";
 import { YamlMenuSource } from "./yaml-menu.js";
 
@@ -32,8 +29,6 @@ export function filesystemRoot(asset: CollectionAsset, root: string, env: Env): 
 }
 
 export interface SourceDeps {
-  /** Needed by postgres_jsonb and postgres_table collections only. */
-  db?: Db | undefined;
   /**
    * The variables `UDC_*` overrides and `${VAR}` headers are read from: the
    * host passes `process.env` (or a subset). None without it.
@@ -47,7 +42,10 @@ export interface SourceDeps {
 }
 
 /**
- * The source `source.yaml` asks for. `null` for an http_api collection when
+ * The source `source.yaml` asks for, for every kind that needs no database
+ * driver: memory, filesystem, http_api and yaml_menu. A postgres_jsonb or
+ * postgres_table collection throws here — `makeSource` from
+ * `@jsudc/server/postgres` makes those and every other kind. `null` for an http_api collection when
  * `UDC_HTTP_SOURCES` is off: the registry then does not serve it. With
  * `UDC_HTTP_FIXTURES=<dir>` every http_api collection reads
  * `<dir>/<collection>.json` (or `.1.json`, `.2.json`, … one per upstream
@@ -59,30 +57,12 @@ export function makeSource(asset: CollectionAsset, deps: SourceDeps): Source | n
   const pageSizeDefault = asset.view.page_size_default;
   const { source } = asset;
   switch (source.kind) {
-    case "postgres_jsonb": {
-      if (!deps.db) throw new Error(`${asset.name}: a postgres_jsonb collection needs a database`);
-      return new PostgresJsonbSource({
-        db: deps.db,
-        table: source.options.table ?? asset.name,
-        initialSchema: asset.schema,
-        pageSizeDefault,
-      });
-    }
-    case "postgres_table": {
-      if (!deps.db) throw new Error(`${asset.name}: a postgres_table collection needs a database`);
-      const o = source.options;
-      return new PostgresTableSource({
-        db: deps.db,
-        schema: asset.schema,
-        table: o.table ?? asset.name,
-        fields: o.columns,
-        idColumn: o.id_column,
-        idType: o.id_type,
-        versionColumn: o.version_column,
-        totalCount: o.total_count,
-        pageSizeDefault,
-      });
-    }
+    case "postgres_jsonb":
+    case "postgres_table":
+      throw new Error(
+        `${asset.name}: a ${source.kind} collection is made by makeSource from ` +
+          `"@jsudc/server/postgres" (npm install pg), not by the root entry's makeSource`,
+      );
     case "memory":
       return new MemorySource({
         schema: asset.schema,

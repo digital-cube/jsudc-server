@@ -15,13 +15,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { connect } from "../src/db/client.js";
 import { createCollectionTableSql } from "../src/db/schema.js";
 import { createDispatcher } from "../src/dispatcher.js";
-import {
-  MemorySource,
-  type OnMutateHook,
-  PostgresJsonbSource,
-  PostgresTableSource,
-  type RowChange,
-} from "../src/index.js";
+import { MemorySource, type RowChange } from "../src/index.js";
+import { type OnMutateHook, PostgresJsonbSource, PostgresTableSource } from "../src/postgres.js";
 import { CollectionRegistry } from "../src/registry.js";
 import type { Source } from "../src/sources/source.js";
 import { TEST_DATABASE_URL, useTestDb } from "./helpers.js";

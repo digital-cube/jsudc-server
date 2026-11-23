@@ -23,26 +23,30 @@ What is in the package:
 - a **Fastify plugin** that mounts it all on your own server, with the OpenAPI
   document of every action.
 
+Two entries. `@jsudc/server` imports no database driver: the dispatcher, the
+plugin, the registry, the scope layer, the change feed, the SQL compiler and
+the `memory`, `filesystem`, `http_api` and `yaml_menu` sources. Everything that
+needs `pg` or a Postgres database — `connect`, the library's SQL, the schema
+store, seeding, the `LISTEN` / `NOTIFY` bus and the `postgres_jsonb` /
+`postgres_table` sources — is in `@jsudc/server/postgres`, and only that entry
+needs `pg` installed.
+
 ```sh
-npm install @jsudc/server @jsudc/core fastify drizzle-orm pg zod
+npm install @jsudc/server @jsudc/core fastify drizzle-orm zod
+# Postgres collections, the schema store and the Postgres bus (@jsudc/server/postgres):
+npm install pg
 # the OpenAPI docs at /docs (on by default):
 npm install @fastify/swagger @fastify/swagger-ui fastify-type-provider-zod
 # or straight from a GitHub tag:
-npm install github:digital-cube/jsudc-core#v0.6.0 github:digital-cube/jsudc-server#v0.6.0
+npm install github:digital-cube/jsudc-core#v0.7.0 github:digital-cube/jsudc-server#v0.7.0
 ```
 
 ## Quick start
 
 ```ts
 import Fastify from "fastify";
-import {
-  connect,
-  createDispatcher,
-  ensureUdcSchema,
-  loadRegistry,
-  makeSource,
-  udcPlugin,
-} from "@jsudc/server";
+import { createDispatcher, loadRegistry, udcPlugin } from "@jsudc/server";
+import { connect, ensureUdcSchema, makeSource } from "@jsudc/server/postgres";
 
 const { db } = connect(process.env.DATABASE_URL ?? "postgresql://localhost/app");
 await ensureUdcSchema(db); // or run migrations/*.sql with your own migration tool
@@ -70,6 +74,19 @@ answers `{ok: true}`; `/docs` is the OpenAPI UI.
 
 `buildApp({dispatcher, registry, logger})` does the two Fastify lines for you
 and returns the instance, for a server that is nothing but UDC.
+
+Without Postgres (no `pg` installed), the root entry's `makeSource` makes every
+kind but the two Postgres ones; a `postgres_jsonb` or `postgres_table`
+collection makes it throw, naming `@jsudc/server/postgres`:
+
+```ts
+import { buildApp, createDispatcher, loadRegistry, makeSource } from "@jsudc/server";
+
+const registry = loadRegistry("./collections", (asset, reg) =>
+  makeSource(asset, { registry: reg, env: process.env }),
+);
+const app = await buildApp({ dispatcher: createDispatcher(registry, { log: console }), registry });
+```
 
 ### The plugin's options
 
@@ -142,7 +159,9 @@ a sort.
 
 ## The six sources
 
-`source.yaml` picks one with `kind`:
+`source.yaml` picks one with `kind`. The two Postgres kinds are made by
+`makeSource` of `@jsudc/server/postgres` (which makes the other four too) and
+need `pg`; the root entry's `makeSource` makes the other four:
 
 | `kind`                     | Rows                                                                                                | Writes                                      |
 | -------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------- |
@@ -234,7 +253,7 @@ CREATE TABLE attachment (id serial PRIMARY KEY, message_id uuid REFERENCES messa
 ```
 
 ```ts
-import { PostgresTableSource } from "@jsudc/server";
+import { PostgresTableSource } from "@jsudc/server/postgres";
 
 registry.register({
   name: "messages",
@@ -424,10 +443,18 @@ const rows = await db.execute(sql`
 | `encodeCursor(parts)`, `decodeCursor(c, keys, idType?)`                                            | the cursor codec (base64url JSON, as udc-py); the id is checked against `idType`         |
 | `escapeLike(text)`                                                                                 | a LIKE pattern that matches literally                                                    |
 | `FieldResolver`, `SqlCast`, `SqlIdType`, `SqlArrayForm`, `sqlCastFor`, `codePointOrder`, `idParam` | the resolver contract and its helpers                                                    |
-| `jsonbResolver`                                                                                    | `postgres_jsonb`'s resolver (`data->>'f'`, a uuid `id`); the default of every `resolve?` |
-| `columnResolver({ fields, id, idType, arrayForms })`                                               | the resolver over typed columns that `PostgresTableSource` uses                          |
+| `jsonbResolver` (`/postgres`)                                                                      | `postgres_jsonb`'s resolver (`data->>'f'`, a uuid `id`); the default of every `resolve?` |
+| `columnResolver({ fields, id, idType, arrayForms })` (`/postgres`)                                 | the resolver over typed columns that `PostgresTableSource` uses                          |
 
 ## The SQL the host must run
+
+Only a `postgres_jsonb` collection needs the library's SQL. A `postgres_table`
+collection uses none of the three migrations: it serves its `schema.json`
+(no revisions), its resolver casts the table's own typed columns (no
+`udc_date` / `udc_timestamptz`) and it builds no expression index. A host
+with only `postgres_table`, `memory`, `filesystem`, `http_api` or `yaml_menu`
+collections runs nothing below. Everything in this section is imported from
+`@jsudc/server/postgres`.
 
 The library owns two kinds of database objects; your collection tables are
 yours.
@@ -454,8 +481,8 @@ migrations as usual; keep `udcSchemaRevisions` in the same schema file so
 drizzle-kit does not try to drop it:
 
 ```ts
-import { collectionTable } from "@jsudc/server";
-export { udcSchemaRevisions } from "@jsudc/server";
+import { collectionTable } from "@jsudc/server/postgres";
+export { udcSchemaRevisions } from "@jsudc/server/postgres";
 export const books = collectionTable("books");
 ```
 
@@ -692,7 +719,7 @@ address are the host's; the hook is the seam.
 
 ```ts
 import { UdcError } from "@jsudc/core";
-import { type OnMutateHook, PostgresTableSource } from "@jsudc/server";
+import { type OnMutateHook, PostgresTableSource } from "@jsudc/server/postgres";
 import { sql } from "drizzle-orm";
 
 type Ctx = { tenant: string; user: string };
@@ -858,7 +885,8 @@ CREATE INDEX message_tsv ON inbox.message USING gin (tsv);
 ```
 
 ```ts
-import { loadRegistry, makeSource, PostgresTableSource } from "@jsudc/server";
+import { loadRegistry } from "@jsudc/server";
+import { makeSource, PostgresTableSource } from "@jsudc/server/postgres";
 import { sql } from "drizzle-orm";
 
 const registry = loadRegistry("./collections", (asset, reg) =>
@@ -907,7 +935,8 @@ jsudc applies the scope regardless.
 
 ```ts
 import { Client } from "@opensearch-project/opensearch";
-import { loadRegistry, makeSource, withSearchIndex } from "@jsudc/server";
+import { loadRegistry, withSearchIndex } from "@jsudc/server";
+import { makeSource } from "@jsudc/server/postgres";
 
 const os = new Client({ node: process.env.OPENSEARCH_URL });
 
@@ -1139,7 +1168,8 @@ behind a load balancer, a change made through one must reach the streams of
 the others; give every process the same bus.
 
 ```ts
-import { createChangeFeed, createPostgresChangeBus } from "@jsudc/server";
+import { createChangeFeed } from "@jsudc/server";
+import { createPostgresChangeBus } from "@jsudc/server/postgres";
 
 const changes = createChangeFeed({
   bus: createPostgresChangeBus({
@@ -1198,35 +1228,47 @@ The stream is one response that never ends. In front of it:
 
 ## API
 
-| Export                                                                                                                                       | What                                                                                     |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                                  | the Fastify plugin, and a Fastify instance with it registered                            |
-| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                           | every action wired to a registry; `Dispatcher` to register actions of your own           |
-| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                             | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap  |
-| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                                | read a collection directory; the served collections                                      |
-| `makeSource`, `SourceDeps`                                                                                                                   | the source `source.yaml` asks for                                                        |
-| `PostgresJsonbSource`, `PostgresTableSource`, `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                          | the six sources, usable directly                                                         |
-| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, …           | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
-| `ArraySource`, `Source` and its request types                                                                                                | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
-| `OnMutateHook`, `OnMutateResult`, `RowChange`                                                                                                | the `onMutate` option of both Postgres sources (see above)                               |
-| `connect`, `Db`, `DbHandle`, `Executor`                                                                                                      | a drizzle database over a `pg` pool                                                      |
-| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                                     | the library's SQL                                                                        |
-| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                                          | the tables, for drizzle and for plain SQL                                                |
-| `seedCollection`                                                                                                                             | schema revision 1 and the rows of a Postgres collection                                  |
-| `activeSchema`, `writeSchemaRevision`                                                                                                        | the schema store under the schema edits                                                  |
-| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                                         | what `describe` answers, for a custom action                                             |
-| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                                    | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
-| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                            | the file preview route on its own                                                        |
-| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                                     | the request context and the row scope (see above)                                        |
-| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`                | the generic row-scope layer, for a route of your own that reaches rows                   |
-| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`, `PostgresTableSearch`                                      | the search box answered by the source (see above)                                        |
-| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                                   | the same pieces, for a source of your own that answers `search`                          |
-| `createChangeFeed`, `ChangeFeed`, `ChangeFeedOptions`, `NotifyOptions`, `ChangeCoalesceOptions`                                              | the change feed and `notify` (see [Change feed](#change-feed))                           |
-| `ChangeBus`, `ChangeNotice`, `ChangeMatch`, `ChangeListener`, `MemoryChangeBus`                                                              | the bus between server processes, and the in-process one                                 |
-| `createPostgresChangeBus`, `PostgresChangeBus`, `PostgresChangeBusOptions`, `encodeNotice`, `DEFAULT_CHANGE_CHANNEL`, `NOTIFY_PAYLOAD_LIMIT` | the `LISTEN` / `NOTIFY` bus                                                              |
-| `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`                       | the stream route on its own, and the scope rule's pieces                                 |
-| `BlobRouteOptions`                                                                                                                           | `registerBlobRoute(app, registry, {context, scope})`                                     |
-| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                                     | the pieces the http_api and filesystem sources are made of                               |
+From `@jsudc/server` (no database driver):
+
+| Export                                                                                                                             | What                                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                        | the Fastify plugin, and a Fastify instance with it registered                            |
+| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                 | every action wired to a registry; `Dispatcher` to register actions of your own           |
+| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                   | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap  |
+| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                      | read a collection directory; the served collections                                      |
+| `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for: memory, filesystem, http_api, yaml_menu               |
+| `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                                                              | four of the six sources, usable directly                                                 |
+| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, … | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
+| `ArraySource`, `Source` and its request types                                                                                      | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
+| `OnMutateResult`, `RowChange`                                                                                                      | what an `onMutate` hook gets and returns                                                 |
+| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                               | what `describe` answers, for a custom action                                             |
+| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                          | the lookup and `row_link` checks: at load, against active schemas, before a schema edit  |
+| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                  | the file preview route on its own                                                        |
+| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                           | the request context and the row scope (see above)                                        |
+| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`      | the generic row-scope layer, for a route of your own that reaches rows                   |
+| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`                                                   | the search box answered by the source (see above)                                        |
+| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                         | the same pieces, for a source of your own that answers `search`                          |
+| `createChangeFeed`, `ChangeFeed`, `ChangeFeedOptions`, `NotifyOptions`, `ChangeCoalesceOptions`                                    | the change feed and `notify` (see [Change feed](#change-feed))                           |
+| `ChangeBus`, `ChangeNotice`, `ChangeMatch`, `ChangeListener`, `MemoryChangeBus`                                                    | the bus between server processes, and the in-process one                                 |
+| `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`             | the stream route on its own, and the scope rule's pieces                                 |
+| `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                     |
+| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                               |
+
+From `@jsudc/server/postgres` (needs `pg`):
+
+| Export                                                                                                                                       | What                                                                                  |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `makeSource`, `PostgresSourceDeps`                                                                                                           | the same, every kind included (`db` for the two Postgres ones)                        |
+| `PostgresJsonbSource`, `PostgresTableSource`, `PostgresTableSourceOptions`, `TableFieldSpec`                                                 | the two Postgres sources                                                              |
+| `OnMutateHook`                                                                                                                               | the `onMutate` option of both Postgres sources (its `tx` is an `Executor`)            |
+| `connect`, `Db`, `DbHandle`, `Executor`                                                                                                      | a drizzle database over a `pg` pool                                                   |
+| `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`                                                                                     | the library's SQL                                                                     |
+| `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`                                                                          | the tables, for drizzle and for plain SQL                                             |
+| `seedCollection`                                                                                                                             | schema revision 1 and the rows of a Postgres collection                               |
+| `activeSchema`, `writeSchemaRevision`                                                                                                        | the schema store under the schema edits                                               |
+| `PostgresTableSearch`                                                                                                                        | `search` of a `PostgresTableSource`                                                   |
+| `createPostgresChangeBus`, `PostgresChangeBus`, `PostgresChangeBusOptions`, `encodeNotice`, `DEFAULT_CHANGE_CHANNEL`, `NOTIFY_PAYLOAD_LIMIT` | the `LISTEN` / `NOTIFY` bus                                                           |
+| `jsonbResolver`, `columnResolver`, `ColumnResolverOptions`                                                                                   | the resolvers of the two Postgres sources (see [The SQL compiler](#the-sql-compiler)) |
 
 ## Develop
 
@@ -1250,6 +1292,7 @@ npm run typecheck   # tsc --noEmit over src and test
 npm run lint        # Biome
 npm test            # Vitest, one file at a time (they share the database)
 npm run test:cov    # coverage, thresholds 80%
+npm run test:no-pg  # npm pack, install in an empty dir without pg, serve a memory collection
 npm run build       # tsc -> dist (ESM + .d.ts)
 ```
 

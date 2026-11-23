@@ -1,4 +1,6 @@
 // @jsudc/server: the UDC protocol served from a collection directory, over Fastify.
+// This entry imports no database driver: everything that needs `pg` or a
+// Postgres database is in `@jsudc/server/postgres` (src/postgres.ts).
 
 export {
   buildApp,
@@ -29,22 +31,11 @@ export {
   scopeValues,
 } from "./changes.js";
 export {
-  createPostgresChangeBus,
-  DEFAULT_CHANGE_CHANNEL,
-  encodeNotice,
-  NOTIFY_PAYLOAD_LIMIT,
-  PostgresChangeBus,
-  type PostgresChangeBusOptions,
-} from "./changes-postgres.js";
-export {
   type ChangesRouteOptions,
   MAX_CHANGE_COLLECTIONS,
   registerChangesRoute,
 } from "./changes-route.js";
 export { deriveColumns } from "./columns.js";
-export { connect, type Db, type DbHandle, type Executor } from "./db/client.js";
-export { ensureUdcSchema, UDC_MIGRATIONS_DIR, udcMigrations } from "./db/ensure.js";
-export { collectionTable, createCollectionTableSql, udcSchemaRevisions } from "./db/schema.js";
 export {
   buildDescribe,
   type Described,
@@ -74,7 +65,7 @@ export {
   readCollectionAssets,
   viewDefaultSortProblems,
 } from "./registry.js";
-export { activeSchema, wireVersion, writeSchemaRevision } from "./schema-store.js";
+export { wireVersion } from "./schema-rules.js";
 export {
   type AccessRequest,
   andFilters,
@@ -86,7 +77,6 @@ export {
   TENANT_WIDE_ACTIONS,
   withoutFields,
 } from "./scope.js";
-export { type SeedOptions, type SeedResult, seedCollection } from "./seed.js";
 export { type ArrayLoad, ArraySource, READ_ONLY_ARRAY_CAPABILITIES } from "./sources/array.js";
 export { DEFAULT_MUTATE_MANY_LIMIT } from "./sources/bulk.js";
 export { type CursorValue, decodeCursor, encodeCursor } from "./sources/cursor.js";
@@ -108,16 +98,7 @@ export {
   type SourceLog,
 } from "./sources/http-api.js";
 export { MemorySource } from "./sources/memory.js";
-export type { OnMutateHook, OnMutateResult, RowChange } from "./sources/on-mutate.js";
-export { PostgresJsonbSource, type PostgresJsonbSourceOptions } from "./sources/postgres-jsonb.js";
-export {
-  type ColumnResolverOptions,
-  columnResolver,
-  type PostgresTableSearch,
-  PostgresTableSource,
-  type PostgresTableSourceOptions,
-  type TableFieldSpec,
-} from "./sources/postgres-table.js";
+export type { OnMutateResult, RowChange } from "./sources/on-mutate.js";
 export {
   assertSearchable,
   decodeSearchCursor,
@@ -150,7 +131,6 @@ export {
   escapeLike,
   type FieldResolver,
   idParam,
-  jsonbResolver,
   orderBy,
   type SortTerm,
   type SqlArrayForm,

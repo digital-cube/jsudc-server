@@ -14,7 +14,7 @@ import {
 import { sql } from "drizzle-orm";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDispatcher } from "../src/dispatcher.js";
-import { PostgresTableSource, type PostgresTableSourceOptions } from "../src/index.js";
+import { PostgresTableSource, type PostgresTableSourceOptions } from "../src/postgres.js";
 import { CollectionRegistry } from "../src/registry.js";
 import type { SourceContext } from "../src/sources/source.js";
 import { rejectsWith, useTestDb } from "./helpers.js";
