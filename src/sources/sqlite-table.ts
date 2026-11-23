@@ -3,6 +3,7 @@ import {
   type Capabilities,
   type FieldDef,
   type ListResponse,
+  ORDER_GAP,
   type Row,
   type RowProblem,
   type SchemaDoc,
@@ -14,16 +15,24 @@ import { type SQL, sql } from "drizzle-orm";
 import { rowScopePins, withoutFields } from "../scope.js";
 import type { SqliteDatabase, SqliteExecutor } from "../sqlite-database.js";
 import { type CursorValue, decodeCursor, encodeCursor, isIdOfType, isUuid } from "./cursor.js";
-import { assertQueryFields, notFound, versionConflict, withoutMeta } from "./fields.js";
+import {
+  assertQueryFields,
+  notFound,
+  reindexPlan,
+  versionConflict,
+  withoutMeta,
+} from "./fields.js";
 import { assertSearchable, searchText } from "./search.js";
 import {
   ALL_FILTER_OPS,
+  DEFAULT_ORDER_FIELD,
   DEFAULT_PAGE_SIZE,
   type Source,
   type SourceAddField,
   type SourceContext,
   type SourceListRequest,
   type SourceMutation,
+  type SourceReindex,
   type SourceUpdateField,
 } from "./source.js";
 import {
@@ -380,7 +389,7 @@ export class SqliteTableSource implements Source {
       total_count: this.totalCount,
       schema_edit: false,
       config_edit: false,
-      reindex: false,
+      reindex: this.writes !== null,
       tree_reparent: false,
       source_yaml: false,
       paging: ["cursor", "offset"],
@@ -544,6 +553,73 @@ export class SqliteTableSource implements Source {
       const moved = this.newIdIn(patch);
       return this.readBack(tx, moved ?? keyText, sctx);
     });
+  }
+
+  /**
+   * One `BEGIN IMMEDIATE` transaction, one `UPDATE … FROM`: number the rows
+   * of the request's `scope` AND the base `where` AND the row scope by their
+   * current order (NULLS LAST, ties by id) and write `n * gap` back, bumping
+   * each version. The order field and every scope field must be writable
+   * columns of the table (`validation_error` otherwise). With `changedRows`
+   * the rows as they were and as they are now are handed over, so the change
+   * feed names them.
+   */
+  async reindex(req: SourceReindex, sctx?: SourceContext): Promise<number> {
+    const w = this.writes;
+    if (!w) throw this.readOnly("reindex");
+    const { filter, orderField } = reindexPlan(
+      this.schema,
+      req.scope,
+      req.order_field ?? DEFAULT_ORDER_FIELD,
+    );
+    const order = col(this.reindexColumn(orderField, "order_field"));
+    for (const field of Object.keys(req.scope)) this.reindexColumn(field, "scope");
+    const where = sql`${this.inScope(sctx)} AND ${compileFilter(filter, this.schema, this.resolver)}`;
+    const gap = req.gap ?? ORDER_GAP;
+    const report = sctx?.changedRows;
+    const set = [
+      sql`${order} = __r.__n * ${gap}`,
+      ...(w.version ? [sql`${w.version} = coalesce(${w.version}, 0) + 1`] : []),
+    ];
+
+    return this.db.transaction((tx) => {
+      const before = report
+        ? tx.all<TableRow>(sql`SELECT ${this.columns()} FROM ${this.from} WHERE ${where}`)
+        : [];
+      // The subquery has only __rid and __n: every bare column of SET and WHERE is the table's.
+      const written = tx.all<{ __id: string }>(sql`
+        UPDATE ${w.table} SET ${sql.join(set, sql`, `)}
+        FROM (
+          SELECT ${w.id} AS __rid,
+                 ROW_NUMBER() OVER (ORDER BY ${order} ASC NULLS LAST, ${w.id} ASC) AS __n
+          FROM ${this.from}
+          WHERE ${where}
+        ) AS __r
+        WHERE ${w.id} = __r.__rid
+        RETURNING CAST(${w.id} AS TEXT) AS __id`);
+      if (report && written.length > 0) {
+        const cast = this.resolver.idType === "integer" ? "numeric" : "text";
+        const ids = written.map((r) => r.__id);
+        const after = tx.all<TableRow>(sql`
+          SELECT ${this.columns()} FROM ${this.from}
+          WHERE ${sqliteDialect.anyOf(w.id, ids, cast)}`);
+        report([...before, ...after].map((row) => this.serialize(row)));
+      }
+      return written.length;
+    });
+  }
+
+  /** The column a `reindex` names `field` by: a writable column of the table, not the id. */
+  private reindexColumn(field: string, what: "order_field" | "scope"): string {
+    const name = this.writes?.columns.get(field);
+    if (name === undefined || (what === "order_field" && this.isIdField(field))) {
+      throw new UdcError(
+        "validation_error",
+        `reindex ${what} ${field} is not a writable column of sqlite_table ${this.label}`,
+        { field },
+      );
+    }
+    return name;
   }
 
   /**

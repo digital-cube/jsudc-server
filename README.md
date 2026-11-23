@@ -169,7 +169,7 @@ over a database the host opened and passed in `SourceDeps.sqlite`):
 | -------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | `postgres_jsonb` (default) | a table, every field in `data jsonb`; `options.table` overrides the name                            | mutate, schema edits, reindex, reparent     |
 | `postgres_table`           | an ordinary relational table with typed columns (see [below](#postgres_table-a-relational-table))   | mutate (plain columns)                      |
-| `sqlite_table`             | one table of a SQLite file, typed columns (see [below](#sqlite_table-a-table-of-a-sqlite-file))     | mutate (plain columns)                      |
+| `sqlite_table`             | one table of a SQLite file, typed columns (see [below](#sqlite_table-a-table-of-a-sqlite-file))     | mutate, reindex (plain columns)             |
 | `memory`                   | `seed.json`, kept in the process                                                                    | mutate, reindex, reparent (lost on restart) |
 | `filesystem`               | the entries of one folder under `options.root` (relative to the collection directory, no `..`)      | read-only                                   |
 | `http_api`                 | one upstream call (`base_url`, `list_endpoint`, `field_map`, …) cached for `cache_ttl_ms`           | read-only                                   |
@@ -402,8 +402,9 @@ scope inside every statement. `SqliteTableSource` takes the options of
 `idColumn`, `idType`, `versionColumn`, `readOnly`, `where`, `totalCount`,
 `keepNulls`, `pageSizeDefault`, `defaultSort` — and a `db`. There is no
 `from` with joins (a computed field can still be a correlated subquery), no
-`onMutate`, no `mutate_many`, no search and no reindex yet: `capabilities`
-says so.
+`onMutate`, no `mutate_many`, no search and no tree reparent: `capabilities`
+says so. `reindex` is there (`capabilities.reindex` when the source writes),
+so a kanban board over a SQLite table can always be reordered.
 
 **One `SqliteDatabase` per file.** A SQLite handle is one connection: a
 statement the host ran on it while the source awaited inside a transaction
@@ -499,6 +500,17 @@ every `SELECT`, `UPDATE` and `DELETE`; its `eq` pins are written over an
 insert or a patch; the written row is read back, and a row that left the scope
 (or the base `where`) rolls the whole transaction back with `forbidden`
 (`reason: out_of_scope`).
+
+**Reindex.** One `BEGIN IMMEDIATE` transaction and one `UPDATE … FROM`: the
+rows of the request's `scope` (ANDed with the base `where` and the row scope)
+are numbered by their current order — NULLs last, ties by id — and get
+`gap`, `2*gap`, … with their version bumped. The `order_field` and every
+`scope` field must be writable columns of the table (not `readOnly`, not
+computed, the order field not the id), else `validation_error`; the order
+column should be INTEGER (or NUMERIC for a `decimal` order), so it sorts as
+a number. With a change feed, the notice names the renumbered rows (the
+source hands them to `changedRows`), so only the streams that see them hear
+of it.
 
 ## The SQL compiler
 
@@ -1255,12 +1267,12 @@ exactly that).
 After its own writes commit (when the source has answered), once per request,
 never for a request that failed:
 
-| Action          | Event                                                                                                                                               |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had) |
-| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                     |
-| `reindex`       | `update` without ids, tested on the request's `scope` and the row scope's pinned values                                                             |
-| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                           |
+| Action          | Event                                                                                                                                                                      |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had)                        |
+| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                                            |
+| `reindex`       | `update` with the renumbered ids when the source hands the rows over (`sqlite_table`), else without ids, tested on the request's `scope` and the row scope's pinned values |
+| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                                                  |
 
 Both Postgres sources hand the rows a `mutate_many` wrote to the feed
 (`SourceContext.changedRows`); a source of your own with a native

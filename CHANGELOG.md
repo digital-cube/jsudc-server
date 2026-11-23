@@ -18,10 +18,19 @@ code (the next core release).
   `eq` pins written over an insert or a patch, the written row read back in
   scope and the transaction rolled back when it left it. The options of
   `PostgresTableSourceOptions` that carry over (no `from` with joins, no
-  `onMutate`, no search); `capabilities.mutate_many`, `reindex` and `search`
-  are off. Values are served in the protocol's JSON types without
+  `onMutate`, no search); `capabilities.mutate_many` and `search` are off. Values are served in the protocol's JSON types without
   `to_jsonb`. A `uuid` id is lower-case TEXT, assigned with
   `crypto.randomUUID()` on insert.
+- `sqlite_table` `reindex` (`capabilities.reindex: true` when the source
+  writes): the scope's rows renumbered to `gap`, `2*gap`, … in their current
+  order (NULLs last, ties by id), each version bumped, in one `BEGIN
+  IMMEDIATE` transaction and one `UPDATE … FROM` with the base `where` and
+  the row scope ANDed in. The order field and the scope fields must be
+  writable columns (`validation_error` otherwise). A kanban board over a
+  SQLite table no longer fails a drop whose neighbours leave no room.
+- `reindex` hands `SourceContext.changedRows` to the source as `mutate_many`
+  does: a source that reports the rows it renumbered (`sqlite_table`) gets a
+  change notice with their ids; the others keep the notice without ids.
 - `SqliteDatabase`, the one object per SQLite file a host shares with the
   sources: one write connection behind an in-process queue, one read
   connection, WAL, `BEGIN IMMEDIATE` for every write transaction, the write

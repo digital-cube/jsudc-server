@@ -113,7 +113,7 @@ describe("a sqlite_table collection over HTTP", () => {
     expect(res.payload.capabilities).toMatchObject({
       mutate: true,
       mutate_many: false,
-      reindex: false,
+      reindex: true,
       total_count: true,
       paging: ["cursor", "offset"],
     });

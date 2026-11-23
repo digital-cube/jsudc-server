@@ -120,7 +120,7 @@ describe.each(WHERES)("sqlite_table writes on %s", (where) => {
       expect(source.capabilities).toMatchObject({
         mutate: true,
         mutate_many: false,
-        reindex: false,
+        reindex: true,
         paging: ["cursor", "offset"],
       });
       expect(source.capabilities.search).toBeUndefined();
