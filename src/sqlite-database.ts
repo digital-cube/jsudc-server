@@ -83,9 +83,42 @@ export interface SqliteDatabaseOptions {
    * a no-op on `:memory:`.
    */
   wal?: boolean | undefined;
+  /**
+   * Notice commits that other connections make to the file (another process:
+   * a customer's tool, the `sqlite3` shell) by polling `PRAGMA data_version`
+   * on the write connection, and call the `onExternalWrite` listeners — a
+   * change feed then tells every stream of the collections served from the
+   * file that they changed (no row ids). `true` polls every
+   * `DEFAULT_SQLITE_WATCH_MS` (1000 ms); `{ intervalMs }` sets the interval.
+   * Commits through this object are never reported. Off by default: nothing
+   * polls. It says THAT the file changed, not which rows.
+   */
+  watch?: boolean | { intervalMs?: number | undefined } | undefined;
 }
 
 export const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5000;
+/** The polling interval of `SqliteDatabaseOptions.watch: true`. */
+export const DEFAULT_SQLITE_WATCH_MS = 1000;
+
+/** A mode of `PRAGMA wal_checkpoint` (see `SqliteDatabase.checkpoint`). */
+export type SqliteCheckpointMode = "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE";
+
+const CHECKPOINT_MODES: ReadonlySet<string> = new Set(["PASSIVE", "FULL", "RESTART", "TRUNCATE"]);
+
+/** What `PRAGMA wal_checkpoint` reports. */
+export interface SqliteCheckpointResult {
+  /**
+   * `true` when a FULL / RESTART / TRUNCATE checkpoint could not finish within
+   * `busyTimeoutMs`: a reader (of this process or another) was still on the
+   * WAL, or another process held the write lock. What could be checkpointed
+   * was; the WAL is not empty.
+   */
+  busy: boolean;
+  /** Frames in the WAL afterwards (0 after a TRUNCATE that finished); -1 when the file is not in WAL mode. */
+  log: number;
+  /** Of those, frames written back into the database file; -1 when the file is not in WAL mode. */
+  checkpointed: number;
+}
 
 /** SQLITE_BUSY (5) or SQLITE_LOCKED (6), with any extended code, as `node:sqlite` or `better-sqlite3` report it. */
 export function isSqliteBusy(err: unknown): boolean {
@@ -145,17 +178,26 @@ interface Waiter {
  *   else waits for the transaction to end.
  * - `read(fn)` runs `fn` on one snapshot of the committed rows.
  *
+ * - With `watch`, `onExternalWrite` listeners hear of commits other
+ *   connections made to the file (see `SqliteDatabaseOptions.watch`).
+ *
  * Nothing is cached about rows between calls: other processes write the file.
  */
 export class SqliteDatabase {
   readonly name: string;
   readonly busyTimeoutMs: number;
+  /** How often `PRAGMA data_version` is polled; `undefined`: `watch` is off and nothing polls. */
+  readonly watchIntervalMs: number | undefined;
   private readonly writer: SqliteConnection;
   private readonly reader: SqliteConnection | undefined;
   private readonly als = new AsyncLocalStorage<TxScope>();
   private held = false;
   private readonly waiting: Waiter[] = [];
   private closed = false;
+  private readonly externalListeners = new Set<() => void>();
+  private watchTimer: ReturnType<typeof setInterval> | undefined;
+  /** The write connection's `data_version` at the last poll. */
+  private dataVersion: number | undefined;
 
   constructor(opts: SqliteDatabaseOptions) {
     this.writer = opts.write;
@@ -164,6 +206,19 @@ export class SqliteDatabase {
     this.busyTimeoutMs = opts.busyTimeoutMs ?? DEFAULT_SQLITE_BUSY_TIMEOUT_MS;
     if (!Number.isInteger(this.busyTimeoutMs) || this.busyTimeoutMs < 0) {
       throw new Error(`SqliteDatabase: busyTimeoutMs must be a non-negative integer`);
+    }
+    const watch = opts.watch;
+    this.watchIntervalMs =
+      watch === undefined || watch === false
+        ? undefined
+        : watch === true
+          ? DEFAULT_SQLITE_WATCH_MS
+          : (watch.intervalMs ?? DEFAULT_SQLITE_WATCH_MS);
+    if (
+      this.watchIntervalMs !== undefined &&
+      (!Number.isInteger(this.watchIntervalMs) || this.watchIntervalMs < 1)
+    ) {
+      throw new Error(`SqliteDatabase: watch.intervalMs must be a positive integer`);
     }
     // The writer waits for the lock itself, asynchronously; a reader waits in SQLite
     // (in WAL mode only for a checkpoint or a recovery, briefly).
@@ -277,10 +332,127 @@ export class SqliteDatabase {
     return { rows: method === "get" ? (rows[0] as unknown[]) : rows };
   };
 
+  /**
+   * A WAL checkpoint (`PRAGMA wal_checkpoint(<mode>)`): fold the WAL into the
+   * database file, e.g. before copying the file while this process keeps it
+   * open. It takes its turn in the write queue like a write (waiting past
+   * `busyTimeoutMs` is the protocol error `busy`) and runs on the write
+   * connection OUTSIDE a transaction (SQLite refuses a checkpoint inside one:
+   * `exec("PRAGMA wal_checkpoint…")` cannot do it).
+   *
+   * The default `TRUNCATE` writes every frame back and truncates `-wal` to 0
+   * bytes, once no reader is on the WAL. While a reader is (another process
+   * in a read transaction), it is retried until `busyTimeoutMs` has passed
+   * and then answered with `busy: true` — check it before copying. `PASSIVE`
+   * never waits and never truncates. Refused inside a transaction of this
+   * database (the turn is held by it). On a file not in WAL mode (or
+   * `:memory:`) the answer is `{ busy: false, log: -1, checkpointed: -1 }`.
+   */
+  async checkpoint(mode: SqliteCheckpointMode = "TRUNCATE"): Promise<SqliteCheckpointResult> {
+    if (!CHECKPOINT_MODES.has(mode)) {
+      throw new Error(`SqliteDatabase ${this.name}: unknown checkpoint mode ${String(mode)}`);
+    }
+    if (this.scope()) {
+      throw new Error(
+        `SqliteDatabase ${this.name}: checkpoint() cannot run inside a transaction of the database`,
+      );
+    }
+    const started = Date.now();
+    await this.acquire(started);
+    try {
+      for (let pause = 2; ; pause = Math.min(pause * 2, 50)) {
+        this.assertOpen();
+        const result = this.checkpointOnce(mode);
+        if (!result.busy) return result;
+        const left = started + this.busyTimeoutMs - Date.now();
+        if (left <= 0) return result;
+        await sleep(Math.min(pause, left));
+      }
+    } finally {
+      this.release();
+    }
+  }
+
+  /**
+   * Call `listener` after other connections committed to the file (another
+   * process, or a connection of this process that does not go through this
+   * object), at most once per poll however many commits there were; returns
+   * its unsubscribe. Only with `watch`: without it the listener is kept and
+   * never called, and nothing polls. Polling runs while at least one
+   * listener is registered, and stops at `close`. A listener that throws is
+   * ignored.
+   */
+  onExternalWrite(listener: () => void): () => void {
+    this.externalListeners.add(listener);
+    this.startWatching();
+    return () => {
+      this.externalListeners.delete(listener);
+      if (this.externalListeners.size === 0) this.stopWatching();
+    };
+  }
+
+  /** Whether `data_version` is being polled now. */
+  get watching(): boolean {
+    return this.watchTimer !== undefined;
+  }
+
+  /**
+   * One poll, which the interval runs: when the write connection's
+   * `data_version` moved since the last one, call the listeners. Exposed for
+   * tests and for a host that wants to check at once (after a known external
+   * import); a no-op without `watch`, after `close`, or while a transaction of
+   * this object is open or waiting (the next poll sees it).
+   */
+  pollExternalWrites(): boolean {
+    if (this.watchIntervalMs === undefined || this.closed || this.held) return false;
+    let version: number;
+    try {
+      // The write connection's own commits never move its data_version; every other
+      // connection's do (the read connection writes nothing). So nothing of ours is
+      // announced, and no commit of another process slips in unseen between one of ours
+      // and a bookkeeping step.
+      const row = this.writer.all("PRAGMA data_version", [])[0];
+      version = Number(row?.data_version);
+    } catch {
+      // The file is locked for a moment (a recovery, another process's exclusive lock):
+      // the next poll sees what changed.
+      return false;
+    }
+    if (!Number.isFinite(version)) return false;
+    const before = this.dataVersion;
+    this.dataVersion = version;
+    if (before === undefined || before === version) return false;
+    for (const listener of [...this.externalListeners]) {
+      try {
+        listener();
+      } catch {
+        // A listener's failure is its own; the others still hear of the change.
+      }
+    }
+    return true;
+  }
+
+  private startWatching(): void {
+    if (this.watchIntervalMs === undefined || this.watchTimer || this.closed) return;
+    // The baseline: commits from here on are reported.
+    this.dataVersion = undefined;
+    this.pollExternalWrites();
+    const timer = setInterval(() => this.pollExternalWrites(), this.watchIntervalMs);
+    timer.unref?.();
+    this.watchTimer = timer;
+  }
+
+  private stopWatching(): void {
+    if (this.watchTimer) clearInterval(this.watchTimer);
+    this.watchTimer = undefined;
+  }
+
   /** Close both connections; a transaction still waiting for its turn is refused. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopWatching();
+    this.externalListeners.clear();
     this.writer.close();
     this.reader?.close();
   }
@@ -416,6 +588,26 @@ export class SqliteDatabase {
     const turn = outer.chain.then(run, run);
     outer.chain = turn.catch(() => undefined);
     return turn;
+  }
+
+  /**
+   * One `PRAGMA wal_checkpoint` on the write connection (its `busy_timeout`
+   * is 0: a blocked checkpoint answers at once). SQLite reports a blocked one
+   * in the row's `busy` column; a busy error thrown instead counts the same.
+   */
+  private checkpointOnce(mode: SqliteCheckpointMode): SqliteCheckpointResult {
+    let row: Record<string, unknown> | undefined;
+    try {
+      row = this.writer.all(`PRAGMA wal_checkpoint(${mode})`, [])[0];
+    } catch (err) {
+      if (!isSqliteBusy(err)) throw err;
+      return { busy: true, log: -1, checkpointed: -1 };
+    }
+    return {
+      busy: Number(row?.busy ?? 0) !== 0,
+      log: Number(row?.log ?? -1),
+      checkpointed: Number(row?.checkpointed ?? -1),
+    };
   }
 
   /** `fn` on `conn` inside `BEGIN` … `COMMIT`: one snapshot. */

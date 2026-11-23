@@ -2,6 +2,7 @@ import {
   type Capabilities,
   type FieldDef,
   type ListResponse,
+  ORDER_GAP,
   type Row,
   type RowProblem,
   type SchemaDoc,
@@ -14,11 +15,18 @@ import type { Db, Executor } from "../db/client.js";
 import { rowScopePins, withoutFields } from "../scope.js";
 import { idArray, missing, tooManyRows } from "./bulk.js";
 import { type CursorValue, decodeCursor, encodeCursor, isIdOfType } from "./cursor.js";
-import { assertQueryFields, notFound, versionConflict, withoutMeta } from "./fields.js";
+import {
+  assertQueryFields,
+  notFound,
+  reindexPlan,
+  versionConflict,
+  withoutMeta,
+} from "./fields.js";
 import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
 import { assertSearchable, encodeSearchCursor, searchPage, searchText } from "./search.js";
 import {
   ALL_FILTER_OPS,
+  DEFAULT_ORDER_FIELD,
   DEFAULT_PAGE_SIZE,
   type MutateManyResult,
   type Source,
@@ -27,6 +35,7 @@ import {
   type SourceListRequest,
   type SourceMutateMany,
   type SourceMutation,
+  type SourceReindex,
   type SourceUpdateField,
 } from "./source.js";
 import {
@@ -41,6 +50,8 @@ import {
   type SqlIdType,
   sortKeyColumns,
 } from "./sql.js";
+import { postgresDialect } from "./sql-dialect.js";
+import { reindexColumn, reindexUpdate } from "./sql-reindex.js";
 
 const ARRAY_TYPES: ReadonlySet<FieldDef["type"]> = new Set(["string_array", "lookup_array"]);
 
@@ -222,6 +233,8 @@ interface WritePlan {
   columns: ReadonlyMap<string, SQL>;
   /** Fields whose value goes to the column as JSON text (`json`, an array stored as jsonb). */
   json: ReadonlySet<string>;
+  /** Writable fields whose column is the id column: never a `reindex` order field. */
+  idFields: ReadonlySet<string>;
 }
 
 /** The parts of `a.b` (`[qualifier, column]`) or `b` (`[undefined, column]`). */
@@ -265,6 +278,8 @@ export class PostgresTableSource implements Source {
   private readonly baseWhere: SQL;
   private readonly version: SQL;
   private readonly selected: { field: string; expr: SQL }[];
+  /** Field → its SQL expression over the `from` (a column, possibly qualified, or the host's SQL). */
+  private readonly exprs: Readonly<Record<string, SQL>>;
   private readonly totalCount: boolean;
   private readonly keepNulls: boolean;
   private readonly pageSizeDefault: number;
@@ -330,6 +345,7 @@ export class PostgresTableSource implements Source {
       }
     }
     this.selected = live.map((field) => ({ field, expr: exprs[field] as SQL }));
+    this.exprs = exprs;
     this.notFilterable = notFilterable;
     this.notSortable = notSortable;
     this.computedFields = computed;
@@ -362,7 +378,7 @@ export class PostgresTableSource implements Source {
       total_count: this.totalCount,
       schema_edit: false,
       config_edit: false,
-      reindex: false,
+      reindex: this.writes !== null,
       tree_reparent: false,
       source_yaml: false,
       paging: ["cursor", "offset"],
@@ -690,6 +706,93 @@ export class PostgresTableSource implements Source {
   }
 
   /**
+   * `reindex` in one transaction, shaped like `sqlite_table`'s (the statement
+   * is `reindexUpdate`, shared by both): the rows of the request's `scope`
+   * AND the base `where` AND the row scope are selected through the `from`,
+   * locked in the write table in id order, then numbered by their current
+   * order (NULLS LAST, ties by id) and written `n * gap` in one `UPDATE …
+   * FROM`, each version bumped. The lock comes first so the numbering, a
+   * statement of its own, sees every row as committed: a concurrent write to
+   * one is waited for, never numbered over. The order field and every scope
+   * field must be writable columns of the write table (`validation_error`
+   * otherwise). With `changedRows` the rows as they were and as they are now
+   * are handed over, so the change feed names them. `onMutate` is not called:
+   * a renumbering writes no field a request named.
+   */
+  async reindex(req: SourceReindex, sctx?: SourceContext): Promise<number> {
+    const w = this.writes;
+    if (!w) throw this.readOnly("reindex");
+    const { filter, orderField } = reindexPlan(
+      this.schema,
+      req.scope,
+      req.order_field ?? DEFAULT_ORDER_FIELD,
+    );
+    const column = (field: string, what: "order_field" | "scope") =>
+      reindexColumn(
+        w.columns,
+        field,
+        what,
+        (f) => w.idFields.has(f),
+        `postgres_table ${this.label}`,
+      );
+    const order = column(orderField, "order_field");
+    for (const field of Object.keys(req.scope)) column(field, "scope");
+    const r = this.resolver;
+    const where = sql`${this.baseWhere} AND ${this.scopeSql(sctx)} AND ${compileFilter(
+      filter,
+      this.schema,
+      r,
+    )}`;
+    const report = sctx?.changedRows;
+
+    return this.db.transaction(async (tx) => {
+      const matched = await tx.execute<{ __id: string }>(
+        sql`SELECT (${r.id})::text AS __id FROM ${this.from} WHERE ${where}`,
+      );
+      if (matched.rows.length === 0) return 0;
+      await tx.execute(sql`
+        SELECT 1 FROM ${w.table}
+        WHERE ${w.id} = ANY(${idArray(
+          matched.rows.map((row) => row.__id),
+          r.idType,
+        )})
+        ORDER BY ${w.id} FOR UPDATE`);
+      const before = report
+        ? (
+            await tx.execute<TableRow>(
+              sql`SELECT ${this.columns()} FROM ${this.from} WHERE ${where}`,
+            )
+          ).rows
+        : [];
+      const written = await tx.execute<{ __id: string }>(
+        reindexUpdate({
+          table: w.table,
+          id: w.id,
+          order,
+          version: w.version,
+          from: this.from,
+          fromId: r.id,
+          fromOrder: this.exprs[orderField] as SQL,
+          where,
+          gap: req.gap ?? ORDER_GAP,
+          dialect: postgresDialect,
+        }),
+      );
+      if (report && written.rows.length > 0) {
+        const ids = idArray(
+          written.rows.map((row) => row.__id),
+          r.idType,
+        );
+        const after = await tx.execute<TableRow>(
+          sql`SELECT ${this.columns()} FROM ${this.from} WHERE ${r.id} = ANY(${ids})`,
+        );
+        report([...before, ...after.rows].map((row) => this.serialize(row)));
+      }
+      return written.rows.length;
+    });
+  }
+
+  /**
    * The fields of an insert or patch, checked: a read-only field is refused
    * by name, the rest validated against the schema. A pinned scope value on a
    * read-only field is left to the scope check of the written row.
@@ -842,12 +945,15 @@ function writePlan(
   };
   const columns = new Map<string, SQL>();
   const json = new Set<string>();
+  const idFields = new Set<string>();
+  const idColumn = own(opts.idColumn ?? "id");
   for (const [field, name] of Object.entries(columnOf)) {
     const col = own(name);
     if (col === null) {
       readOnly.push(field);
       continue;
     }
+    if (col === idColumn) idFields.add(field);
     columns.set(field, identifier(col, `column of ${field}`));
     const type = (schema.fields[field] as FieldDef).type;
     if (type === "json" || arrayForms[field] === "jsonb") json.add(field);
@@ -859,6 +965,7 @@ function writePlan(
       opts.versionColumn === undefined ? null : ownOrThrow(opts.versionColumn, "version column"),
     columns,
     json,
+    idFields,
   };
 }
 

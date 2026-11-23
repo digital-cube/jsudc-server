@@ -39,7 +39,7 @@ npm install pg
 # the OpenAPI docs at /docs (on by default):
 npm install @fastify/swagger @fastify/swagger-ui fastify-type-provider-zod
 # or straight from a GitHub tag:
-npm install github:digital-cube/jsudc-core#v0.7.0 github:digital-cube/jsudc-server#v0.7.0
+npm install github:digital-cube/jsudc-core#v0.8.0 github:digital-cube/jsudc-server#v0.8.0
 ```
 
 ## Quick start
@@ -168,7 +168,7 @@ over a database the host opened and passed in `SourceDeps.sqlite`):
 | `kind`                     | Rows                                                                                                | Writes                                      |
 | -------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | `postgres_jsonb` (default) | a table, every field in `data jsonb`; `options.table` overrides the name                            | mutate, schema edits, reindex, reparent     |
-| `postgres_table`           | an ordinary relational table with typed columns (see [below](#postgres_table-a-relational-table))   | mutate (plain columns)                      |
+| `postgres_table`           | an ordinary relational table with typed columns (see [below](#postgres_table-a-relational-table))   | mutate, reindex (plain columns)             |
 | `sqlite_table`             | one table of a SQLite file, typed columns (see [below](#sqlite_table-a-table-of-a-sqlite-file))     | mutate, reindex (plain columns)             |
 | `memory`                   | `seed.json`, kept in the process                                                                    | mutate, reindex, reparent (lost on restart) |
 | `filesystem`               | the entries of one folder under `options.root` (relative to the collection directory, no `..`)      | read-only                                   |
@@ -214,7 +214,7 @@ of `data->>'field'`. Number, date, datetime and bool columns are compared as
 their own type (an integer column against a `numeric` parameter, so `2.5` never
 rounds); text is compared and sorted by code point (`COLLATE "C"`), so the
 results agree with `evaluateFilter`. The schema is the collection's
-`schema.json` (no revisions, no schema edits, no reindex, no tree reparent).
+`schema.json` (no revisions, no schema edits, no tree reparent).
 It writes its plain columns (see [Writing](#writing-a-postgres_table)). A NULL column is left out of the row, as a field
 missing from `data` is (`keepNulls: true` serves `null`).
 
@@ -359,6 +359,18 @@ writable; to serve it read-only, register it in code with `readOnly: true`.
   through the `from` (so the answer carries the computed and joined fields as
   they are now), run `onMutate`. A constraint the database refuses (a foreign
   key) rolls it back and is answered `internal`.
+- **`reindex`** (`capabilities.reindex` when the source writes), so a kanban
+  board over a relational table survives running out of order values: the
+  rows of the request's `scope`, inside the base `where` and the row scope,
+  are renumbered `gap`, `2*gap`, … in their current order (NULLs last, ties by
+  id), each version bumped, in one transaction. The rows are locked in
+  `writeTable` first (id order, as `mutate_many`), so a concurrent edit of one
+  is waited for and numbered as committed. The order field and every scope
+  field must be writable columns of the write table: a computed field, a
+  `readOnly` column, a column of another table of the `from` or the id is
+  `validation_error`. The statement is the one `sqlite_table` runs
+  (`reindexUpdate`); like there, `onMutate` is not called for the renumbered
+  rows, and the change feed gets their ids.
 
 The `message` example above, writable: the `from` names the table its rows
 live in, `attachment_count` is computed and `received_at` is kept by the
@@ -400,9 +412,11 @@ dialect), `read`, `mutate` (insert, partial update, delete) and
 takes the options of `PostgresTableSourceOptions` that carry over — `schema`,
 `table`, `fields` (`column`, `sql`, `computed`, `readOnly`, `filterable`,
 `sortable`), `idColumn`, `idType`, `versionColumn`, `readOnly`, `onMutate`,
-`where`, `totalCount`, `keepNulls`, `pageSizeDefault`, `defaultSort` — and a
-`db`. There is no `from` with joins (a computed field can still be a
-correlated subquery), no search and no tree reparent: `capabilities` says so.
+`where`, `search`, `totalCount`, `keepNulls`, `pageSizeDefault`,
+`defaultSort` — and a `db`. There is no `from` with joins (a computed field
+can still be a correlated subquery) and no tree reparent: `capabilities` says
+so. `search` answers the search box with FTS5 (see
+[On `sqlite_table`: FTS5](#on-sqlite_table-fts5)).
 `reindex` is there (`capabilities.reindex` when the source writes), so a
 kanban board over a SQLite table can always be reordered.
 
@@ -455,6 +469,11 @@ options:
   (`details: { database, waited_ms }`, nothing written, retry later). Reads go
   to the read connection and never wait for a writer (WAL). Nothing about rows
   is cached between requests.
+- Their writes reach the change feed only with **`watch`** (off by default):
+  `openNodeSqlite(path, { watch: true })` polls the file's `data_version`
+  every second (`{ watch: { intervalMs } }` for another interval), and the
+  streams of every collection served from the file are told that it changed —
+  see [Writes by other processes to a SQLite file](#writes-by-other-processes-to-a-sqlite-file).
 - `:memory:` has a single connection; reads then take their turn in the queue.
 - **`better-sqlite3`** instead of `node:sqlite`: `openBetterSqlite(path,
   opts)` from `@jsudc/server/better-sqlite3` opens the file the same way (a
@@ -476,6 +495,35 @@ types: numbers, booleans from 0/1, arrays and objects parsed, datetimes in the
 ISO form. A datetime another program wrote as `2021-06-01 10:00:00` is served
 as `2021-06-01T10:00:00.000Z`, but filters and sorts compare the stored text,
 so other writers should store the canonical form.
+
+**Copying the file while it is open** (a backup, a vault copied to another
+machine). In WAL mode the committed rows are in the main file _and_ in
+`-wal`; a copy of the main file alone misses the latter. Fold the WAL in
+first with `checkpoint()`, then copy:
+
+```ts
+import { cp } from "node:fs/promises";
+
+const { busy } = await vault.checkpoint(); // TRUNCATE: -wal is 0 bytes afterwards
+if (busy) throw new Error("a reader is still on the WAL; try again"); // after busyTimeoutMs
+await cp("/var/lib/app/vault.db", "/backup/vault.db");
+```
+
+`checkpoint(mode = "TRUNCATE")` takes its turn in the write queue like a
+write (so no transaction of this process is half-way through) and runs
+`PRAGMA wal_checkpoint(<mode>)` on the write connection **outside** a
+transaction — `exec("PRAGMA wal_checkpoint(TRUNCATE)")` cannot: `exec` runs
+in a write transaction, where SQLite refuses a checkpoint ("database table is
+locked"). The answer is `{ busy, log, checkpointed }` as SQLite reports it
+(`log` and `checkpointed` are -1 when the file is not in WAL mode). While a
+reader of another process is on the WAL, it is retried until `busyTimeoutMs`
+and then answered with `busy: true`; waiting for the queue that long is the
+protocol error `busy`, as for a write. `PASSIVE` never waits and never
+truncates. Refused inside a transaction of the same database. Writes that
+arrive after the checkpoint can land in `-wal` again before the copy is done:
+stop writing first if the copy has to be exact (or use SQLite's backup API,
+`VACUUM INTO`, on a connection of your own). `close()` checkpoints too and
+removes `-wal` and `-shm`.
 
 **Ids.** `uuid` (the default) is a TEXT column holding the canonical
 lower-case 36-character form: the source assigns `crypto.randomUUID()` on an
@@ -564,6 +612,77 @@ const audit: SqliteOnMutateHook<{ user: string }> = (ctx, change, tx) => {
 };
 const notes = new SqliteTableSource({ db: vault, schema, table: "note", onMutate: audit });
 ```
+
+## Several databases, several instances
+
+**One vault, several SQLite files.** Each `sqlite_table` collection names its
+file in `source.yaml` (`database: boards`, `database: tickets`), and the host
+opens each file once and registers it under that name:
+
+```ts
+const boards = openNodeSqlite("/data/vault/boards.db", { name: "boards" });
+const tickets = openNodeSqlite("/data/vault/tickets.db", { name: "tickets" });
+const registry = loadRegistry("./collections", (asset, reg) =>
+  makeSource(asset, { registry: reg, sqlite: { boards, tickets } }),
+);
+```
+
+A lookup or a `row_link` from a collection in one file to a collection in
+another needs nothing more: `checkRegistryLinks` compares schemas, not
+files; the client fetches a lookup's labels with an ordinary `list` on the
+target (`lookupKeysFilter`), and a `row_link` opens the target with an `eq`
+condition, so neither is a join. Filtering and sorting by the lookup key
+work as on any column. Every file has its own write queue and lock: a write
+to a collection in `tickets.db` opens no transaction in `boards.db`, so a
+`transaction` that spans both files does not exist (each file commits on
+its own). Joins across files (`ATTACH`) are not supported.
+
+**One process, several vaults.** Register `udcPlugin` once per vault, each
+under its own prefix and with its own registry, dispatcher (`context`,
+`rowScope`, `access`), change feed and SQLite handles. The plugin keeps no
+module-level state: each registration has its own routes, error handler,
+`/healthz`, `GET /udc/changes` and Swagger (`/vault-a/docs` documents
+`/vault-a/udc/*` only; give each a `title`).
+
+```ts
+const app = Fastify();
+for (const vault of vaults) {
+  await app.register(
+    async (scope) => {
+      // A closed vault is gone: every route under its prefix answers 404.
+      scope.addHook("onRequest", async (_req, reply) => {
+        if (vault.closed) {
+          return reply.code(404).send({ code: "not_found", message: "no such vault" });
+        }
+      });
+      await scope.register(udcPlugin, {
+        dispatcher: vault.dispatcher, // createDispatcher(vault.registry, { rowScope, changes: vault.changes })
+        registry: vault.registry,
+        context: (req) => vault.contextOf(req),
+        swagger: { title: `vault ${vault.name}` },
+      });
+    },
+    { prefix: `/${vault.name}` },
+  );
+}
+```
+
+**Closing one vault** while the others keep serving. Fastify cannot remove
+routes from a running server, so the host stops routing to the vault, then
+closes what the vault owns:
+
+```ts
+vault.closed = true; // the onRequest guard above: new requests answer 404
+await vault.changes.close(); // ends this feed's open streams; the clients' reconnect gets 404
+for (const db of vault.databases) db.close(); // SqliteDatabase.close(): both connections
+```
+
+`ChangeFeed.close()` ends every stream subscribed to that feed and refuses
+new ones (`GET /udc/changes` answers 404 for a closed feed, and the client
+stops reconnecting), leaving every other vault's feed and streams alone.
+Close the SQLite handles last: a statement on a closed `SqliteDatabase`
+throws. Routing by host name instead of prefix is the host's own work
+(Fastify's `constraints: { host }`, or a proxy).
 
 ## The SQL compiler
 
@@ -1145,6 +1264,116 @@ await client.list({ collection: "message", search: "invoice -draft", page: { lim
 // ORDER BY (ts_rank(tsv, websearch_to_tsquery('simple', $3))) DESC NULLS LAST, id ASC LIMIT 51 OFFSET 0
 ```
 
+### On `sqlite_table`: FTS5
+
+`SqliteTableSource` takes the same `search` option (`SqliteTableSearch`:
+`match(q, text)`, optional `rank(q, text)`, SQL written in code, `q` the text
+as a bound parameter), with the same rules: the match is ANDed with the base
+`where`, the row scope and the client's filter in the source's one
+statement; a search without a `sort` comes by rank (ties by id), paged by
+offset with the search cursor; with a `sort`, or without `rank`, it is one
+more condition of an ordinary list. The recommended shape is an
+**external-content FTS5 table** over the collection's table, **kept in step
+by triggers in the database** — not by the source, because other processes
+write the file too (another server, a customer's tool, the `sqlite3` shell),
+and a trigger indexes their rows in their own transaction. Two helpers make
+it:
+
+- `sqliteFts5Sql({ table, columns, fts?, tokenize?, triggerPrefix? })` — the
+  migration text: `CREATE VIRTUAL TABLE <table>_fts USING fts5(<columns>,
+  content='<table>', content_rowid='rowid', tokenize='unicode61')`, an
+  `AFTER INSERT`, an `AFTER DELETE` and an `AFTER UPDATE OF <columns>`
+  trigger, and a `rebuild` that indexes the rows already there. All of it
+  `IF NOT EXISTS`, so it can run at every start.
+- `sqliteFts5Search({ table, fts?, weights?, prefix?, maxTerms? })` — the
+  `search` option over that table: `match` is `<table>.rowid IN (SELECT
+  rowid FROM <fts> WHERE <fts> MATCH ?)`, `rank` is `-bm25(<fts>, …weights)`
+  of the row (bm25 is lower for a better hit, so negated: higher first).
+
+The parameter bound to `MATCH` is not the raw text: FTS5 raises a syntax
+error on an unbalanced `"`, a bare `-`, `:` or `*`, `NEAR(`, a trailing
+`OR`. `fts5MatchExpression(text, { prefix, maxTerms })` makes one FTS5
+always accepts — every whitespace-separated term quoted (`"` doubled),
+the terms ANDed, the last one a prefix (`"invo"*`, for search as you type;
+`prefix: false` turns it off), terms with no letter or digit dropped. So
+operators and column filters typed into the box are plain words, and a text
+that leaves no term (`"`, `*`, `-`) matches nothing instead of failing.
+Use it in a `match` of your own as well.
+
+```sql
+-- What sqliteFts5Sql({ table: "note", columns: ["title", "body_text"] }) returns:
+CREATE VIRTUAL TABLE IF NOT EXISTS "note_fts" USING fts5("title", "body_text", content='note', content_rowid='rowid', tokenize='unicode61');
+CREATE TRIGGER IF NOT EXISTS "note_fts_ai" AFTER INSERT ON "note" BEGIN
+  INSERT INTO "note_fts"(rowid, "title", "body_text") VALUES (new.rowid, new."title", new."body_text");
+END;
+CREATE TRIGGER IF NOT EXISTS "note_fts_ad" AFTER DELETE ON "note" BEGIN
+  INSERT INTO "note_fts"("note_fts", rowid, "title", "body_text") VALUES ('delete', old.rowid, old."title", old."body_text");
+END;
+CREATE TRIGGER IF NOT EXISTS "note_fts_au" AFTER UPDATE OF "title", "body_text" ON "note" BEGIN
+  INSERT INTO "note_fts"("note_fts", rowid, "title", "body_text") VALUES ('delete', old.rowid, old."title", old."body_text");
+  INSERT INTO "note_fts"(rowid, "title", "body_text") VALUES (new.rowid, new."title", new."body_text");
+END;
+INSERT INTO "note_fts"("note_fts") VALUES ('rebuild');
+```
+
+```ts
+import { loadRegistry, makeSource } from "@jsudc/server";
+import {
+  openNodeSqlite,
+  SqliteTableSource,
+  sqliteFts5Search,
+  sqliteFts5Sql,
+} from "@jsudc/server/sqlite";
+
+const vault = openNodeSqlite("/var/lib/app/vault.db", { name: "vault" });
+await vault.exec(sqliteFts5Sql({ table: "note", columns: ["title", "body_text"] }));
+
+const registry = loadRegistry("./collections", (asset, reg) =>
+  asset.name === "notes"
+    ? new SqliteTableSource({
+        db: vault,
+        schema: asset.schema,
+        table: "note",
+        versionColumn: "version",
+        fields: { body: "body_text" },
+        // A title hit counts three times a body hit.
+        search: sqliteFts5Search({ table: "note", weights: [3, 1] }),
+      })
+    : makeSource(asset, { registry: reg, sqlite: { vault } }),
+);
+// list { search: "invoice octo" } → roughly (each MATCH ? bound to '"invoice" AND "octo"*'):
+// SELECT … FROM "note" WHERE 1 AND "owner" = ? AND 1
+//   AND ("note".rowid IN (SELECT rowid FROM "note_fts" WHERE "note_fts" MATCH ?))
+// ORDER BY CAST(((SELECT -bm25("note_fts", 3, 1) FROM "note_fts"
+//   WHERE "note_fts" MATCH ? AND rowid = "note".rowid)) AS REAL) DESC NULLS LAST, "id" ASC LIMIT 51 OFFSET 0
+```
+
+- **Tokenizer.** `unicode61` is the default: words of Unicode letters and
+  digits, case-folded, diacritics removed from Latin letters (`ručak` is
+  found by `rucak`; `đ` is a letter of its own, not a `d`). Pass `tokenize`
+  for another (`"unicode61 remove_diacritics 2"`, `"porter unicode61"`);
+  the source does not care which.
+- **Rowids.** The index is keyed by the table's `rowid`. A table whose id is
+  an `INTEGER PRIMARY KEY` keeps its rowids; one with a uuid or text id has
+  rowids that `VACUUM` may renumber — run `sqliteFts5RebuildSql(opts)` after
+  a `VACUUM` of such a file. `WITHOUT ROWID` tables cannot have an
+  external-content index.
+- **Writers.** Every writer goes through the triggers, the source's own
+  `mutate` and `mutate_many` included; the version trigger
+  (`sqliteVersionTriggerSql`) does not re-index a row, since it writes no
+  indexed column.
+- `search` is set in code, not in `source.yaml`: a collection with it is made
+  by the host (as above) rather than by `makeSource`.
+
+**FTS5 or `withSearchIndex`?** Use FTS5 when the text lives in the SQLite
+file and other processes write it: the index is part of the database, always
+in step, and the row scope, the filter and the rank run in one statement, so
+a page is never short. Use `withSearchIndex` when the index is a service of
+its own that the host keeps up to date (OpenSearch, a vector store) or needs
+what FTS5 lacks (semantic search, typo tolerance, one index over many
+collections), accepting that a page may come back shorter when the scope or
+the filter drops hits.
+
 ### An external index: `withSearchIndex`
 
 When the index lives outside the database (OpenSearch, Elasticsearch, a
@@ -1312,7 +1541,9 @@ action `list`), else 404; its row scope is fixed for the life of the stream.
 Then it sends a `retry:` hint (`retryMs`, default 3 s), a `ready` event, a
 `change` event per change the request may see, and a heartbeat comment every
 `heartbeatMs` (default 15 s). The listener is removed when the client goes
-away, and `app.close()` ends every open stream. There is **no replay**: a
+away, and `app.close()` ends every open stream (`changes.close()` ends the
+streams of that feed alone: see [Several databases, several
+instances](#several-databases-several-instances)). There is **no replay**: a
 change made while a client was disconnected is not sent later; the client
 refetches when it reconnects (`UdcClient.changes` reports `reconnected` for
 exactly that).
@@ -1322,12 +1553,12 @@ exactly that).
 After its own writes commit (when the source has answered), once per request,
 never for a request that failed:
 
-| Action          | Event                                                                                                                                                                      |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had)                        |
-| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                                            |
-| `reindex`       | `update` with the renumbered ids when the source hands the rows over (`sqlite_table`), else without ids, tested on the request's `scope` and the row scope's pinned values |
-| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                                                  |
+| Action          | Event                                                                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had)                                          |
+| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                                                              |
+| `reindex`       | `update` with the renumbered ids when the source hands the rows over (`postgres_table`, `sqlite_table`), else without ids, tested on the request's `scope` and the row scope's pinned values |
+| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                                                                    |
 
 Both Postgres sources and `sqlite_table` hand the rows a `mutate_many` wrote
 to the feed (`SourceContext.changedRows`); a source of your own with a native
@@ -1377,6 +1608,57 @@ async function syncMailbox(user: string): Promise<void> {
 }
 ```
 
+### Writes by other processes to a SQLite file
+
+A SQLite file is also written by programs that are not this server: a
+customer's tool, the `sqlite3` shell, a sync job in another process. Those
+writes go through neither jsudc nor your code, so nothing calls `notify`.
+Open the file with **`watch`** and the server notices them:
+
+```ts
+import { openNodeSqlite } from "@jsudc/server/sqlite";
+
+const vault = openNodeSqlite("vault.db", { watch: true }); // or { watch: { intervalMs: 500 } }
+const changes = createChangeFeed();
+const dispatcher = createDispatcher<Ctx>(registry, { log, rowScope, changes });
+```
+
+The `SqliteDatabase` polls `PRAGMA data_version` on its write connection —
+every `DEFAULT_SQLITE_WATCH_MS` (1000 ms) with `watch: true` — while at least
+one listener is registered; a dispatcher with a change feed registers one per
+`sqlite_table` collection (`Source.onExternalWrite`). That value moves when
+**another connection** commits to the file, never for the wrapper's own
+commits, so a write through jsudc or through the same `SqliteDatabase` sends
+only its normal exact notice, never a second, coarse one. When it moved, every
+collection served from that file gets one event, `{ collection, op: "update" }`
+**without ids**, on every stream of this process subscribed to it — **scoped
+streams too**, since a scope cannot be tested without rows — through the
+stream's usual burst control. The client refetches under its own scope, so
+nothing leaks but the fact that something changed.
+
+What it is, and what it is not:
+
+- It detects **that the file changed, not which rows**, nor which table: every
+  collection of the file is told, whatever the other program wrote (even a
+  table no collection serves). Several commits between two polls are one event.
+- It is **as late as the interval**: up to `intervalMs` after the commit.
+  Without `watch` nothing polls, and such writes reach a screen only through
+  its own polling fallback or a reload.
+- **A host that needs exact notices for its own writes made in the same
+  process calls `changes.notify` itself** (with `rows` or `ctx`, see above).
+  A write through the `SqliteDatabase` (`run`, `transaction`, `proxy` for
+  Drizzle) is never seen as external, so without `notify` it is not announced
+  at all; a write through a connection the host opened itself, outside the
+  wrapper, is seen as external and announced coarsely.
+- The event is delivered to this process's streams and **not published on the
+  bus**: each server process that opens the file with `watch` notices the
+  write itself. With several processes on one file, a write one of them makes
+  through jsudc looks external to the others: their streams get the exact
+  notice over the bus and, within the interval, a coarse one as well.
+- `ChangeFeed.externalChange(collection)` sends the same coarse event by hand,
+  for a source of your own that learns of outside writes some other way
+  (implement `Source.onExternalWrite`, and the dispatcher wires it).
+
 ### The scope rule, in plain words
 
 A stream is told about a change in a collection when it asked for that
@@ -1385,7 +1667,9 @@ least one of the changed rows; it then receives only the ids of the rows its
 scope holds for. To test that, a change carries, on the server only, the
 values of the changed rows a scope can test (strings up to 256 characters,
 numbers, booleans, null, short arrays of those; row contents beyond that are
-never kept). A change whose rows are unknown reaches unscoped streams only.
+never kept). A change whose rows are unknown reaches unscoped streams only —
+except a write another process made to a SQLite file opened with `watch`
+(above), which every stream of the collection hears of, without ids.
 
 Burst control: past `coalesce.maxEvents` events (default 20) for one
 collection on one stream within `coalesce.windowMs` (default 250 ms), the
@@ -1462,31 +1746,32 @@ The stream is one response that never ends. In front of it:
 
 From `@jsudc/server` (no database driver):
 
-| Export                                                                                                                             | What                                                                                                           |
-| ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                        | the Fastify plugin, and a Fastify instance with it registered                                                  |
-| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                 | every action wired to a registry; `Dispatcher` to register actions of your own                                 |
-| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                   | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap                        |
-| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                      | read a collection directory; the served collections                                                            |
-| `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for: memory, filesystem, http_api, yaml_menu, sqlite_table                       |
-| `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                                                              | four of the seven sources, usable directly                                                                     |
-| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, … | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))                         |
-| `ArraySource`, `Source` and its request types                                                                                      | to write a source of your own: implement `Source`, or extend `ArraySource` over an array                       |
-| `OnMutateResult`, `RowChange`                                                                                                      | what an `onMutate` hook gets and returns                                                                       |
-| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                               | what `describe` answers, for a custom action                                                                   |
-| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                          | the lookup and `row_link` checks: at load, against active schemas, before a schema edit                        |
-| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                  | the file preview route on its own                                                                              |
-| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                           | the request context and the row scope (see above)                                                              |
-| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`      | the generic row-scope layer, for a route of your own that reaches rows                                         |
-| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`                                                   | the search box answered by the source (see above)                                                              |
-| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                         | the same pieces, for a source of your own that answers `search`                                                |
-| `createChangeFeed`, `ChangeFeed`, `ChangeFeedOptions`, `NotifyOptions`, `ChangeCoalesceOptions`                                    | the change feed and `notify` (see [Change feed](#change-feed))                                                 |
-| `ChangeBus`, `ChangeNotice`, `ChangeMatch`, `ChangeListener`, `MemoryChangeBus`                                                    | the bus between server processes, and the in-process one                                                       |
-| `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`             | the stream route on its own, and the scope rule's pieces                                                       |
-| `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                                           |
-| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                                                     |
-| `SqliteTableSource`, `SqliteTableSourceOptions`, `SqliteTableFieldSpec`, `SqliteOnMutateHook`, `sqliteVersionTriggerSql`           | the SQLite table source and its version trigger (see [`sqlite_table`](#sqlite_table-a-table-of-a-sqlite-file)) |
-| `SqliteDatabase`, `SqliteConnection`, `SqliteExecutor`, `isSqliteBusy`, `DEFAULT_SQLITE_BUSY_TIMEOUT_MS`                           | the one object per SQLite file, over a driver adapter                                                          |
+| Export                                                                                                                              | What                                                                                                             |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `udcPlugin`, `buildApp`, `UdcPluginOptions`                                                                                         | the Fastify plugin, and a Fastify instance with it registered                                                    |
+| `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                  | every action wired to a registry; `Dispatcher` to register actions of your own                                   |
+| `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                    | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap                          |
+| `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                       | read a collection directory; the served collections                                                              |
+| `makeSource`, `SourceDeps`                                                                                                          | the source `source.yaml` asks for: memory, filesystem, http_api, yaml_menu, sqlite_table                         |
+| `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                                                               | four of the seven sources, usable directly                                                                       |
+| `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, …  | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))                           |
+| `ArraySource`, `Source` and its request types                                                                                       | to write a source of your own: implement `Source`, or extend `ArraySource` over an array                         |
+| `OnMutateResult`, `RowChange`                                                                                                       | what an `onMutate` hook gets and returns                                                                         |
+| `buildDescribe`, `filterableFields`, `deriveColumns`                                                                                | what `describe` answers, for a custom action                                                                     |
+| `registryLinkProblems`, `assertRegistryLinks`, `checkRegistryLinks`, `assertLookupTarget`                                           | the lookup and `row_link` checks: at load, against active schemas, before a schema edit                          |
+| `registerBlobRoute`, `BLOB_ROUTE`                                                                                                   | the file preview route on its own                                                                                |
+| `DispatcherOptions`, `RowScopeOptions`, `AccessRequest`, `SourceContext`                                                            | the request context and the row scope (see above)                                                                |
+| `ScopedCollection`, `openCollection`, `andFilters`, `rowScopePins`, `withoutFields`, `describeWithout`, `TENANT_WIDE_ACTIONS`       | the generic row-scope layer, for a route of your own that reaches rows                                           |
+| `withSearchIndex`, `SearchIndexOptions`, `SearchIndexQuery`, `SearchIndexResult`                                                    | the search box answered by the source (see above)                                                                |
+| `searchText`, `assertSearchable`, `searchPage`, `encodeSearchCursor`, `decodeSearchCursor`                                          | the same pieces, for a source of your own that answers `search`                                                  |
+| `createChangeFeed`, `ChangeFeed`, `ChangeFeedOptions`, `NotifyOptions`, `ChangeCoalesceOptions`                                     | the change feed and `notify` (see [Change feed](#change-feed))                                                   |
+| `ChangeBus`, `ChangeNotice`, `ChangeMatch`, `ChangeListener`, `MemoryChangeBus`                                                     | the bus between server processes, and the in-process one                                                         |
+| `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`              | the stream route on its own, and the scope rule's pieces                                                         |
+| `BlobRouteOptions`                                                                                                                  | `registerBlobRoute(app, registry, {context, scope})`                                                             |
+| `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                            | the pieces the http_api and filesystem sources are made of                                                       |
+| `SqliteTableSource`, `SqliteTableSourceOptions`, `SqliteTableFieldSpec`, `SqliteOnMutateHook`, `sqliteVersionTriggerSql`            | the SQLite table source and its version trigger (see [`sqlite_table`](#sqlite_table-a-table-of-a-sqlite-file))   |
+| `SqliteTableSearch`, `sqliteFts5Search`, `sqliteFts5Sql`, `sqliteFts5RebuildSql`, `fts5MatchExpression`, `SqliteFts5…Options`       | the search box on a `sqlite_table` with FTS5 (see [On `sqlite_table`: FTS5](#on-sqlite_table-fts5))              |
+| `SqliteDatabase`, `SqliteConnection`, `SqliteExecutor`, `isSqliteBusy`, `DEFAULT_SQLITE_BUSY_TIMEOUT_MS`, `DEFAULT_SQLITE_WATCH_MS` | the one object per SQLite file, over a driver adapter; `watch` and `onExternalWrite` for other processes' writes |
 
 From `@jsudc/server/sqlite` (`node:sqlite`, built into Node 24): `openNodeSqlite`,
 `OpenNodeSqliteOptions` and `nodeSqliteConnection` — a file opened as one

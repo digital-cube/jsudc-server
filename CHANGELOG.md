@@ -7,10 +7,33 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
-The write side of `sqlite_table` completed: `mutate_many`, the host's
-`onMutate` hook, and a second driver. Nothing changes for a Postgres host.
+## [0.8.0] - 2026-11-23
+
+The second SQLite set and `reindex` on `postgres_table`; released together
+with `@jsudc/core` 0.8.0 and `@jsudc/react` 0.8.0, and the `@jsudc/core` range
+is `^0.8.0`. Everything is an addition: a 0.7.0 host runs unchanged.
+
+1. The write side of `sqlite_table` completed: `mutate_many`, the host's
+   `onMutate` hook, and a second driver, `better-sqlite3`.
+2. The search box answered by a `sqlite_table` with FTS5.
+3. Several SQLite files behind one registry, and several `udcPlugin`
+   instances (vaults) in one app, each closed on its own.
+4. `SqliteDatabase.checkpoint()`, to copy a database file while the server
+   keeps it open.
+5. Writes other processes make to a SQLite file reach the change feed
+   (`PRAGMA data_version`).
+6. `reindex` on `postgres_table`, so a kanban board over a relational table
+   survives running out of order values.
 
 ### Added
+
+- Several SQLite files behind one registry (each `sqlite_table` names its
+  `database`; lookups and `row_link` across files are checked and resolved),
+  and several `udcPlugin` instances in one Fastify app, each with its own
+  registry, dispatcher, change feed and Swagger. See "Several databases,
+  several instances" in the README.
+- `ChangeFeed.closed`, and `ChangeSubscriber.end` (the stream route ends its
+  response through it).
 
 - `sqlite_table` serves `mutate_many` (`capabilities.mutate_many: true` when
   the source writes), as `postgres_table` does: one `BEGIN IMMEDIATE`
@@ -32,6 +55,61 @@ The write side of `sqlite_table` completed: `mutate_many`, the host's
   `betterSqliteConnection(db)`, the `better-sqlite3` adapter of
   `SqliteDatabase` (same options as `openNodeSqlite`). `better-sqlite3` is a
   new optional peer, loaded only by that entry when it opens a file.
+- `search` on `SqliteTableSource` (`SqliteTableSearch`: `match(q, text)`,
+  optional `rank(q, text)`), as on `postgres_table`: `capabilities.search:
+  "source"`, the match ANDed with the base `where`, the row scope and the
+  client's filter in the source's one statement, a search without a `sort`
+  by rank (ties by id) paged by offset with the search cursor.
+- FTS5 helpers: `sqliteFts5Sql(opts)` — an external-content FTS5 table over
+  the collection's table and the insert, delete and update triggers that keep
+  it in step in the database, whoever writes the file, plus a `rebuild`
+  (`sqliteFts5RebuildSql`); `sqliteFts5Search(opts)` — the `search` option
+  over it (`rowid IN (… MATCH ?)`, rank `-bm25()` with optional column
+  weights); `fts5MatchExpression(text)` — the search box's text as a MATCH
+  expression FTS5 never refuses (terms quoted and ANDed, the last a prefix; a
+  text with no term matches nothing). Default tokenizer `unicode61`.
+- `SqliteDatabase.checkpoint(mode = "TRUNCATE")`: a WAL checkpoint
+  (`PRAGMA wal_checkpoint`) on the write connection, outside a transaction, in
+  its turn of the write queue — for copying a database file while the server
+  keeps it open. Answers `{ busy, log, checkpointed }` (types
+  `SqliteCheckpointMode`, `SqliteCheckpointResult`); a reader of another
+  process still on the WAL after `busyTimeoutMs` is `busy: true`, the queue
+  not free by then the protocol error `busy`. `exec("PRAGMA
+  wal_checkpoint(…)")` could not do it: `exec` runs inside a write
+  transaction, where SQLite refuses a checkpoint.
+- `reindex` on `postgres_table` (`capabilities.reindex: true` when the source
+  writes), so a kanban board over a relational Postgres table no longer
+  answers `unsupported_op` once a drop finds two neighbours with adjacent
+  orders. The rows of the scope, inside the base `where` and the row scope,
+  are locked in the write table and renumbered `gap`, `2*gap`, … in their
+  current order (NULLs last, ties by id) in one transaction, each version
+  bumped; the order and scope fields must be writable columns of the write
+  table. The renumbered rows go to `changedRows`, so the change feed names
+  them. Works over a `from` with joins and a `writeTable`.
+
+### Changed
+
+- `ChangeFeed.close()` ends every open stream subscribed to the feed, drops
+  later notices, refuses a new subscription, and stops polling the files it
+  watched; `GET /udc/changes` answers 404 for a closed feed, so the client
+  stops reconnecting. Closing one vault's feed leaves every other feed of the
+  process serving. Before, a closed feed left its streams hanging on
+  heartbeats.
+- `sqlite_table` and `postgres_table` build their `reindex` statement with one
+  shared function (`reindexUpdate`, `src/sources/sql-reindex.ts`); the SQLite
+  statement is unchanged.
+- Writes other processes make to a SQLite file reach the change feed:
+  `watch` on `SqliteDatabase` (and `openNodeSqlite` / `openBetterSqlite`;
+  off by default, `true` = every `DEFAULT_SQLITE_WATCH_MS`, 1000 ms, or
+  `{ intervalMs }`) polls `PRAGMA data_version` on the write connection,
+  which moves only for other connections' commits, and calls the
+  `onExternalWrite(listener)` listeners. A dispatcher with a change feed
+  subscribes every collection whose source has `onExternalWrite`
+  (`sqlite_table` does), and `ChangeFeed.externalChange(collection)` tells
+  every stream of that collection in this process, scoped ones too, one
+  `update` without ids, through the burst control; it is not put on the bus.
+  The wrapper's own commits are never announced a second time.
+  `ChangeFeed.close()` unsubscribes, which stops the polling.
 
 ## [0.7.0] - 2026-11-23
 
@@ -498,7 +576,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/digital-cube/jsudc-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/digital-cube/jsudc-server/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/digital-cube/jsudc-server/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...v0.5.0

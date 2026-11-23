@@ -269,6 +269,8 @@ export function createDispatcher<Ctx = unknown>(
     );
   }
   const feed = dispatcher.changes;
+  // Writes other processes make to a collection's storage (a SQLite file with `watch`).
+  if (feed) for (const c of registry.list()) feed.watchExternal(c.name, c.source);
   const open = (action: string, collection: string, ctx: unknown) =>
     openCollection(registry, scoping, action, collection, ctx, feed);
   return dispatcher

@@ -24,7 +24,7 @@ import {
   withoutMeta,
 } from "./fields.js";
 import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
-import { assertSearchable, searchText } from "./search.js";
+import { assertSearchable, encodeSearchCursor, searchPage, searchText } from "./search.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_ORDER_FIELD,
@@ -49,6 +49,7 @@ import {
   type SqlIdType,
   sortKeyColumns,
 } from "./sql.js";
+import { reindexColumn, reindexUpdate } from "./sql-reindex.js";
 import { sqliteColumnResolver, sqliteDateTime, sqliteDialect } from "./sqlite-sql.js";
 
 /** One field of a `sqlite_table` collection, when it is more than a column of its own name. */
@@ -73,6 +74,25 @@ export interface SqliteTableFieldSpec {
   filterable?: boolean | undefined;
   /** `false`: refused in a sort like an unknown field and left out of `describe.sortable`. */
   sortable?: boolean | undefined;
+}
+
+/**
+ * How a `sqlite_table` source matches the search box in SQL, written by the
+ * host in code: the counterpart of `PostgresTableSearch`. `q` is the search
+ * text as a bound parameter (never spliced into the statement); `text` is the
+ * same text, for a host that binds a parameter of its own made from it — an
+ * FTS5 `MATCH` expression, as `fts5MatchExpression` builds. `sqliteFts5Search`
+ * returns both functions for an FTS5 table kept by `sqliteFts5Sql`'s triggers.
+ */
+export interface SqliteTableSearch {
+  /** A condition true for a row that matches: `` sql`rowid IN (SELECT rowid FROM note_fts WHERE note_fts MATCH ${expr})` ``. */
+  match(q: SQL, text: string): SQL;
+  /**
+   * The relevance of a row, higher first: `` sql`-bm25(…)` `` in a correlated
+   * subquery. With it, a search without a `sort` comes by rank (ties by id),
+   * paged by offset. Without it, a search is ordered like any list.
+   */
+  rank?(q: SQL, text: string): SQL;
 }
 
 export interface SqliteTableSourceOptions {
@@ -109,6 +129,14 @@ export interface SqliteTableSourceOptions {
   onMutate?(ctx: unknown, change: RowChange, tx: SqliteExecutor): OnMutateResult;
   /** A condition (SQL, from code) ANDed into every statement. */
   where?: SQL | string | undefined;
+  /**
+   * The search box answered by this source (`capabilities.search: "source"`):
+   * the text of a `list` with `search` is matched by `search.match`, ANDed
+   * with the base `where`, the row scope and the client's filter, and ranked
+   * by `search.rank` when there is no `sort`. Without it a `search` is
+   * refused (`unsupported_op`) and the client composes `contains`.
+   */
+  search?: SqliteTableSearch | undefined;
   /** `false`: no `count(*)` next to the page; `total` is `null`. Default `true`. */
   totalCount?: boolean | undefined;
   /** `true`: a NULL column is served as `null`; by default it is left out of the row. */
@@ -116,8 +144,9 @@ export interface SqliteTableSourceOptions {
   pageSizeDefault?: number | undefined;
   /**
    * The order of a `list` that asks for none (an absent or empty `sort`):
-   * `[{ field: "received_at", dir: "desc" }]`. The fields must be sortable;
-   * the constructor refuses others. Default: the id alone.
+   * `[{ field: "received_at", dir: "desc" }]`. A ranked search without a sort
+   * still comes by rank. The fields must be sortable; the constructor refuses
+   * others. Default: the id alone.
    */
   defaultSort?: readonly SortKey[] | undefined;
 }
@@ -148,7 +177,7 @@ export type SqliteOnMutateHook<Ctx = unknown> = (
 const IDENT_PART = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
 
 /** `note` or `aux.note` as quoted identifiers; anything else is refused. */
-function identifier(name: string, what: string): SQL {
+export function identifier(name: string, what: string): SQL {
   const parts = name.split(".");
   if (parts.length > 2 || !parts.every((p) => IDENT_PART.test(p))) {
     throw new Error(`invalid ${what} ${JSON.stringify(name)}: a name or schema.name`);
@@ -160,7 +189,7 @@ function identifier(name: string, what: string): SQL {
 }
 
 /** A bare column name (no schema qualifier): what the version trigger and a write name. */
-function columnName(name: string, what: string): string {
+export function columnName(name: string, what: string): string {
   if (!IDENT_PART.test(name)) throw new Error(`invalid ${what} ${JSON.stringify(name)}`);
   return name;
 }
@@ -310,6 +339,7 @@ export class SqliteTableSource implements Source {
   private readonly resolver: FieldResolver;
   private readonly from: SQL;
   private readonly baseWhere: SQL;
+  private readonly search: SqliteTableSearch | undefined;
   private readonly version: SQL;
   private readonly selected: { field: string; expr: SQL; storage: Storage }[];
   private readonly storage: Readonly<Record<string, Storage>>;
@@ -321,6 +351,14 @@ export class SqliteTableSource implements Source {
   private readonly writeSchema: SchemaDoc;
   private readonly defaultSort: SortKey[] | undefined;
   private readonly onMutate: SqliteTableSourceOptions["onMutate"];
+
+  /**
+   * Commits other connections made to the database file, as the
+   * `SqliteDatabase` notices them (only with its `watch` option).
+   */
+  onExternalWrite(listener: () => void): () => void {
+    return this.db.onExternalWrite(listener);
+  }
 
   constructor(opts: SqliteTableSourceOptions) {
     const schema = opts.schema;
@@ -336,6 +374,7 @@ export class SqliteTableSource implements Source {
     this.label = opts.table;
     this.from = identifier(opts.table, "table");
     this.baseWhere = opts.where === undefined ? sql`1` : sql`(${raw(opts.where)})`;
+    this.search = opts.search;
     const versionName =
       opts.versionColumn === undefined
         ? undefined
@@ -428,6 +467,7 @@ export class SqliteTableSource implements Source {
       tree_reparent: false,
       source_yaml: false,
       paging: ["cursor", "offset"],
+      ...(this.search ? { search: "source" as const } : {}),
       supported_filter_ops: ALL_FILTER_OPS,
     };
   }
@@ -441,13 +481,21 @@ export class SqliteTableSource implements Source {
     assertQueryFields(this.filterSchema, req.filter, undefined);
     assertQueryFields(this.sortSchema, undefined, req.sort);
     const text = searchText(req.search);
-    if (text !== undefined) assertSearchable(this.capabilities, this.label, text);
+    if (text !== undefined && !this.search) {
+      assertSearchable(this.capabilities, this.label, text);
+    }
     const r = this.resolver;
+    const q = sql`${text}`;
+    const match = text !== undefined && this.search ? this.search.match(q, text) : sql`1`;
+    // The client filter against what a client may filter by; the host's row scope against the whole schema.
     const where = sql`${this.baseWhere} AND ${this.scopeSql(sctx)} AND ${compileFilter(
       req.filter,
       this.filterSchema,
       r,
-    )}`;
+    )} AND (${match})`;
+    if (text !== undefined && this.search?.rank && !req.sort?.length) {
+      return this.listByRank(where, this.search.rank(q, text), req);
+    }
     const terms = compileSort(req.sort?.length ? req.sort : this.defaultSort, this.sortSchema, r);
     const limit = req.page?.limit ?? this.pageSizeDefault;
     const cursor = req.page?.cursor;
@@ -482,6 +530,32 @@ export class SqliteTableSource implements Source {
           ])
         : null;
     return { rows: page.map((row) => this.serialize(row)), next_cursor, total };
+  }
+
+  /**
+   * One page of a search in relevance order (ties by id), by offset or the
+   * cursor of the previous page. The rank is cast to REAL: a constant integer
+   * in `ORDER BY` would be read as a column number.
+   */
+  private async listByRank(where: SQL, rank: SQL, req: SourceListRequest): Promise<ListResponse> {
+    const { limit, offset } = searchPage(req, this.pageSizeDefault);
+    const { rows, total } = await this.db.read((q) => ({
+      rows: q.all<TableRow>(sql`
+        SELECT ${this.columns()}
+        FROM ${this.from}
+        WHERE ${where}
+        ORDER BY CAST((${rank}) AS REAL) DESC NULLS LAST, ${this.resolver.id} ASC
+        LIMIT ${limit + 1} OFFSET ${offset}`),
+      total: this.totalCount
+        ? (q.get<{ total: number }>(sql`SELECT count(*) AS total FROM ${this.from} WHERE ${where}`)
+            ?.total ?? 0)
+        : null,
+    }));
+    return {
+      rows: rows.slice(0, limit).map((row) => this.serialize(row)),
+      next_cursor: rows.length > limit ? encodeSearchCursor(offset + limit) : null,
+      total,
+    };
   }
 
   async read(id: string, sctx?: SourceContext): Promise<Row> {
@@ -758,31 +832,32 @@ export class SqliteTableSource implements Source {
       req.scope,
       req.order_field ?? DEFAULT_ORDER_FIELD,
     );
-    const order = col(this.reindexColumn(orderField, "order_field"));
-    for (const field of Object.keys(req.scope)) this.reindexColumn(field, "scope");
+    const column = (field: string, what: "order_field" | "scope") =>
+      reindexColumn(w.columns, field, what, (f) => this.isIdField(f), `sqlite_table ${this.label}`);
+    const order = col(column(orderField, "order_field"));
+    for (const field of Object.keys(req.scope)) column(field, "scope");
     const where = sql`${this.inScope(sctx)} AND ${compileFilter(filter, this.schema, this.resolver)}`;
-    const gap = req.gap ?? ORDER_GAP;
     const report = sctx?.changedRows;
-    const set = [
-      sql`${order} = __r.__n * ${gap}`,
-      ...(w.version ? [sql`${w.version} = coalesce(${w.version}, 0) + 1`] : []),
-    ];
 
     return this.db.transaction((tx) => {
       const before = report
         ? tx.all<TableRow>(sql`SELECT ${this.columns()} FROM ${this.from} WHERE ${where}`)
         : [];
-      // The subquery has only __rid and __n: every bare column of SET and WHERE is the table's.
-      const written = tx.all<{ __id: string }>(sql`
-        UPDATE ${w.table} SET ${sql.join(set, sql`, `)}
-        FROM (
-          SELECT ${w.id} AS __rid,
-                 ROW_NUMBER() OVER (ORDER BY ${order} ASC NULLS LAST, ${w.id} ASC) AS __n
-          FROM ${this.from}
-          WHERE ${where}
-        ) AS __r
-        WHERE ${w.id} = __r.__rid
-        RETURNING CAST(${w.id} AS TEXT) AS __id`);
+      // No joins here: the table's own columns on both sides of the statement.
+      const written = tx.all<{ __id: string }>(
+        reindexUpdate({
+          table: w.table,
+          id: w.id,
+          order,
+          version: w.version,
+          from: this.from,
+          fromId: w.id,
+          fromOrder: order,
+          where,
+          gap: req.gap ?? ORDER_GAP,
+          dialect: sqliteDialect,
+        }),
+      );
       if (report && written.length > 0) {
         const cast = this.resolver.idType === "integer" ? "numeric" : "text";
         const ids = written.map((r) => r.__id);
@@ -793,19 +868,6 @@ export class SqliteTableSource implements Source {
       }
       return written.length;
     });
-  }
-
-  /** The column a `reindex` names `field` by: a writable column of the table, not the id. */
-  private reindexColumn(field: string, what: "order_field" | "scope"): string {
-    const name = this.writes?.columns.get(field);
-    if (name === undefined || (what === "order_field" && this.isIdField(field))) {
-      throw new UdcError(
-        "validation_error",
-        `reindex ${what} ${field} is not a writable column of sqlite_table ${this.label}`,
-        { field },
-      );
-    }
-    return name;
   }
 
   /**
