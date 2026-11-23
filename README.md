@@ -470,14 +470,14 @@ const q = sqliteQuery(sql`SELECT * FROM people WHERE ${compileFilter(filter, sch
 const rows = db.prepare(q.sql).all(...q.params);
 ```
 
-| Postgres (`postgresDialect`)                  | SQLite (`sqliteDialect`)                                                   |
-| --------------------------------------------- | -------------------------------------------------------------------------- |
-| `$1::numeric`, `$1::date`, …                  | `?`, the value converted in JS: booleans 1/0, datetimes to UTC text        |
-| `x COLLATE "C"`                               | `x COLLATE BINARY` (code point order for UTF-8)                            |
-| `x LIKE $1` / `x ILIKE $1`                    | `x GLOB ?` / `lower(x) LIKE lower(?) ESCAPE '\'`                           |
-| `x = ANY($1::text[])`, `x <> ALL(…)`          | `x IN (SELECT value FROM json_each(?))`, `NOT IN`, one JSON parameter      |
-| `unnest(col)`, `jsonb_array_elements_text`    | `json_each(col)`: an array field is a JSON array in a TEXT column          |
-| `(x)::text AS "__k0"`, `(id::text)`           | `CAST(x AS TEXT)`, `CAST(id AS TEXT)`                                      |
+| Postgres (`postgresDialect`)               | SQLite (`sqliteDialect`)                                              |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| `$1::numeric`, `$1::date`, …               | `?`, the value converted in JS: booleans 1/0, datetimes to UTC text   |
+| `x COLLATE "C"`                            | `x COLLATE BINARY` (code point order for UTF-8)                       |
+| `x LIKE $1` / `x ILIKE $1`                 | `x GLOB ?` / `lower(x) LIKE lower(?) ESCAPE '\'`                      |
+| `x = ANY($1::text[])`, `x <> ALL(…)`       | `x IN (SELECT value FROM json_each(?))`, `NOT IN`, one JSON parameter |
+| `unnest(col)`, `jsonb_array_elements_text` | `json_each(col)`: an array field is a JSON array in a TEXT column     |
+| `(x)::text AS "__k0"`, `(id::text)`        | `CAST(x AS TEXT)`, `CAST(id AS TEXT)`                                 |
 
 What a SQLite table holds, per field type: `integer`/`year` INTEGER, `decimal`
 NUMERIC (a REAL column keeps `-3` as `-3.0`, whose text is not `-3`), `bool`
