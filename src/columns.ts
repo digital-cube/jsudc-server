@@ -38,17 +38,27 @@ export function placeUnlisted<T extends { field: string }>(
   return out;
 }
 
+/** `hidden: true` on a column config (core 0.5.2; read loosely so an older core parses it too). */
+const isHidden = (c: ColumnConfig) => (c as { hidden?: unknown }).hidden === true;
+
 /**
  * The table columns `describe` serves: `view.columns` in file order (the
  * styled base layout), minus columns of deleted fields, plus a default column
  * for every non-deleted schema field the view does not list, placed by
- * `placeUnlisted`.
+ * `placeUnlisted`. With `mode` `listed` no default column is added. A column
+ * marked `hidden: true` is left out, and its field still counts as listed, so
+ * it does not come back as a default column.
  */
 export function deriveColumns(
   columns: readonly ColumnConfig[],
   schema: FieldOrder,
   defaultWidth: number,
+  mode: "all" | "listed" = "all",
 ): ColumnConfig[] {
   const kept = columns.filter((c) => schema.fields[c.field]?.deleted !== true);
-  return placeUnlisted(kept, schema, (field) => ({ field, width: defaultWidth, editable: true }));
+  const placed =
+    mode === "listed"
+      ? kept
+      : placeUnlisted(kept, schema, (field) => ({ field, width: defaultWidth, editable: true }));
+  return placed.filter((c) => !isHidden(c));
 }

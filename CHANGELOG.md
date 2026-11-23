@@ -9,6 +9,13 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ### Added
 
+- `describe` leaves a schema field out of the table on request: a column marked
+  `hidden: true` is not served (and its field gets no default column), and a
+  view with `columns_mode: listed` gets no default column for the fields it
+  does not list. The fields stay in the schema, the rows and the filter
+  builder. `deriveColumns` takes the mode as an optional fourth argument
+  (`"all"` by default). Both keys are read loosely, so `@jsudc/core` 0.5.0
+  views carry them too.
 - `PostgresTableSource` option `defaultSort` (as `ArraySource` has): the order
   of a `list` whose `sort` is absent or empty, instead of the id alone. A
   ranked search without a sort still comes by rank; cursor paging follows the
