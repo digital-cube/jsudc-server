@@ -15,6 +15,8 @@ export {
 export {
   DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
   isSqliteBusy,
+  type SqliteCheckpointMode,
+  type SqliteCheckpointResult,
   type SqliteConnection,
   SqliteDatabase,
   type SqliteDatabaseOptions,

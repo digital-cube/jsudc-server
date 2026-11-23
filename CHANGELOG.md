@@ -32,6 +32,15 @@ The write side of `sqlite_table` completed: `mutate_many`, the host's
   `betterSqliteConnection(db)`, the `better-sqlite3` adapter of
   `SqliteDatabase` (same options as `openNodeSqlite`). `better-sqlite3` is a
   new optional peer, loaded only by that entry when it opens a file.
+- `SqliteDatabase.checkpoint(mode = "TRUNCATE")`: a WAL checkpoint
+  (`PRAGMA wal_checkpoint`) on the write connection, outside a transaction, in
+  its turn of the write queue — for copying a database file while the server
+  keeps it open. Answers `{ busy, log, checkpointed }` (types
+  `SqliteCheckpointMode`, `SqliteCheckpointResult`); a reader of another
+  process still on the WAL after `busyTimeoutMs` is `busy: true`, the queue
+  not free by then the protocol error `busy`. `exec("PRAGMA
+  wal_checkpoint(…)")` could not do it: `exec` runs inside a write
+  transaction, where SQLite refuses a checkpoint.
 
 ## [0.7.0] - 2026-11-23
 

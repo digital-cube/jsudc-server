@@ -87,6 +87,26 @@ export interface SqliteDatabaseOptions {
 
 export const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5000;
 
+/** A mode of `PRAGMA wal_checkpoint` (see `SqliteDatabase.checkpoint`). */
+export type SqliteCheckpointMode = "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE";
+
+const CHECKPOINT_MODES: ReadonlySet<string> = new Set(["PASSIVE", "FULL", "RESTART", "TRUNCATE"]);
+
+/** What `PRAGMA wal_checkpoint` reports. */
+export interface SqliteCheckpointResult {
+  /**
+   * `true` when a FULL / RESTART / TRUNCATE checkpoint could not finish within
+   * `busyTimeoutMs`: a reader (of this process or another) was still on the
+   * WAL, or another process held the write lock. What could be checkpointed
+   * was; the WAL is not empty.
+   */
+  busy: boolean;
+  /** Frames in the WAL afterwards (0 after a TRUNCATE that finished); -1 when the file is not in WAL mode. */
+  log: number;
+  /** Of those, frames written back into the database file; -1 when the file is not in WAL mode. */
+  checkpointed: number;
+}
+
 /** SQLITE_BUSY (5) or SQLITE_LOCKED (6), with any extended code, as `node:sqlite` or `better-sqlite3` report it. */
 export function isSqliteBusy(err: unknown): boolean {
   if (typeof err !== "object" || err === null) return false;
@@ -277,6 +297,47 @@ export class SqliteDatabase {
     return { rows: method === "get" ? (rows[0] as unknown[]) : rows };
   };
 
+  /**
+   * A WAL checkpoint (`PRAGMA wal_checkpoint(<mode>)`): fold the WAL into the
+   * database file, e.g. before copying the file while this process keeps it
+   * open. It takes its turn in the write queue like a write (waiting past
+   * `busyTimeoutMs` is the protocol error `busy`) and runs on the write
+   * connection OUTSIDE a transaction (SQLite refuses a checkpoint inside one:
+   * `exec("PRAGMA wal_checkpoint…")` cannot do it).
+   *
+   * The default `TRUNCATE` writes every frame back and truncates `-wal` to 0
+   * bytes, once no reader is on the WAL. While a reader is (another process
+   * in a read transaction), it is retried until `busyTimeoutMs` has passed
+   * and then answered with `busy: true` — check it before copying. `PASSIVE`
+   * never waits and never truncates. Refused inside a transaction of this
+   * database (the turn is held by it). On a file not in WAL mode (or
+   * `:memory:`) the answer is `{ busy: false, log: -1, checkpointed: -1 }`.
+   */
+  async checkpoint(mode: SqliteCheckpointMode = "TRUNCATE"): Promise<SqliteCheckpointResult> {
+    if (!CHECKPOINT_MODES.has(mode)) {
+      throw new Error(`SqliteDatabase ${this.name}: unknown checkpoint mode ${String(mode)}`);
+    }
+    if (this.scope()) {
+      throw new Error(
+        `SqliteDatabase ${this.name}: checkpoint() cannot run inside a transaction of the database`,
+      );
+    }
+    const started = Date.now();
+    await this.acquire(started);
+    try {
+      for (let pause = 2; ; pause = Math.min(pause * 2, 50)) {
+        this.assertOpen();
+        const result = this.checkpointOnce(mode);
+        if (!result.busy) return result;
+        const left = started + this.busyTimeoutMs - Date.now();
+        if (left <= 0) return result;
+        await sleep(Math.min(pause, left));
+      }
+    } finally {
+      this.release();
+    }
+  }
+
   /** Close both connections; a transaction still waiting for its turn is refused. */
   close(): void {
     if (this.closed) return;
@@ -416,6 +477,26 @@ export class SqliteDatabase {
     const turn = outer.chain.then(run, run);
     outer.chain = turn.catch(() => undefined);
     return turn;
+  }
+
+  /**
+   * One `PRAGMA wal_checkpoint` on the write connection (its `busy_timeout`
+   * is 0: a blocked checkpoint answers at once). SQLite reports a blocked one
+   * in the row's `busy` column; a busy error thrown instead counts the same.
+   */
+  private checkpointOnce(mode: SqliteCheckpointMode): SqliteCheckpointResult {
+    let row: Record<string, unknown> | undefined;
+    try {
+      row = this.writer.all(`PRAGMA wal_checkpoint(${mode})`, [])[0];
+    } catch (err) {
+      if (!isSqliteBusy(err)) throw err;
+      return { busy: true, log: -1, checkpointed: -1 };
+    }
+    return {
+      busy: Number(row?.busy ?? 0) !== 0,
+      log: Number(row?.log ?? -1),
+      checkpointed: Number(row?.checkpointed ?? -1),
+    };
   }
 
   /** `fn` on `conn` inside `BEGIN` … `COMMIT`: one snapshot. */
