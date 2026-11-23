@@ -168,7 +168,7 @@ over a database the host opened and passed in `SourceDeps.sqlite`):
 | `kind`                     | Rows                                                                                                | Writes                                      |
 | -------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | `postgres_jsonb` (default) | a table, every field in `data jsonb`; `options.table` overrides the name                            | mutate, schema edits, reindex, reparent     |
-| `postgres_table`           | an ordinary relational table with typed columns (see [below](#postgres_table-a-relational-table))   | mutate (plain columns)                      |
+| `postgres_table`           | an ordinary relational table with typed columns (see [below](#postgres_table-a-relational-table))   | mutate, reindex (plain columns)             |
 | `sqlite_table`             | one table of a SQLite file, typed columns (see [below](#sqlite_table-a-table-of-a-sqlite-file))     | mutate, reindex (plain columns)             |
 | `memory`                   | `seed.json`, kept in the process                                                                    | mutate, reindex, reparent (lost on restart) |
 | `filesystem`               | the entries of one folder under `options.root` (relative to the collection directory, no `..`)      | read-only                                   |
@@ -214,7 +214,7 @@ of `data->>'field'`. Number, date, datetime and bool columns are compared as
 their own type (an integer column against a `numeric` parameter, so `2.5` never
 rounds); text is compared and sorted by code point (`COLLATE "C"`), so the
 results agree with `evaluateFilter`. The schema is the collection's
-`schema.json` (no revisions, no schema edits, no reindex, no tree reparent).
+`schema.json` (no revisions, no schema edits, no tree reparent).
 It writes its plain columns (see [Writing](#writing-a-postgres_table)). A NULL column is left out of the row, as a field
 missing from `data` is (`keepNulls: true` serves `null`).
 
@@ -359,6 +359,18 @@ writable; to serve it read-only, register it in code with `readOnly: true`.
   through the `from` (so the answer carries the computed and joined fields as
   they are now), run `onMutate`. A constraint the database refuses (a foreign
   key) rolls it back and is answered `internal`.
+- **`reindex`** (`capabilities.reindex` when the source writes), so a kanban
+  board over a relational table survives running out of order values: the
+  rows of the request's `scope`, inside the base `where` and the row scope,
+  are renumbered `gap`, `2*gap`, … in their current order (NULLs last, ties by
+  id), each version bumped, in one transaction. The rows are locked in
+  `writeTable` first (id order, as `mutate_many`), so a concurrent edit of one
+  is waited for and numbered as committed. The order field and every scope
+  field must be writable columns of the write table: a computed field, a
+  `readOnly` column, a column of another table of the `from` or the id is
+  `validation_error`. The statement is the one `sqlite_table` runs
+  (`reindexUpdate`); like there, `onMutate` is not called for the renumbered
+  rows, and the change feed gets their ids.
 
 The `message` example above, writable: the `from` names the table its rows
 live in, `attachment_count` is computed and `received_at` is kept by the
@@ -1536,12 +1548,12 @@ exactly that).
 After its own writes commit (when the source has answered), once per request,
 never for a request that failed:
 
-| Action          | Event                                                                                                                                                                      |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had)                        |
-| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                                            |
-| `reindex`       | `update` with the renumbered ids when the source hands the rows over (`sqlite_table`), else without ids, tested on the request's `scope` and the row scope's pinned values |
-| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                                                  |
+| Action          | Event                                                                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mutate`        | `insert` / `update` / `delete` with the row's id, tested on the row as written (an update also on the row as it was; a delete on the values it had)                                          |
+| `mutate_many`   | `update` / `delete` with the ids of the rows it changed, each tested on its own values (as it was and as it is)                                                                              |
+| `reindex`       | `update` with the renumbered ids when the source hands the rows over (`postgres_table`, `sqlite_table`), else without ids, tested on the request's `scope` and the row scope's pinned values |
+| `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                                                                    |
 
 Both Postgres sources and `sqlite_table` hand the rows a `mutate_many` wrote
 to the feed (`SourceContext.changedRows`); a source of your own with a native

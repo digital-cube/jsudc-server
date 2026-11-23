@@ -49,6 +49,7 @@ import {
   type SqlIdType,
   sortKeyColumns,
 } from "./sql.js";
+import { reindexColumn, reindexUpdate } from "./sql-reindex.js";
 import { sqliteColumnResolver, sqliteDateTime, sqliteDialect } from "./sqlite-sql.js";
 
 /** One field of a `sqlite_table` collection, when it is more than a column of its own name. */
@@ -823,31 +824,32 @@ export class SqliteTableSource implements Source {
       req.scope,
       req.order_field ?? DEFAULT_ORDER_FIELD,
     );
-    const order = col(this.reindexColumn(orderField, "order_field"));
-    for (const field of Object.keys(req.scope)) this.reindexColumn(field, "scope");
+    const column = (field: string, what: "order_field" | "scope") =>
+      reindexColumn(w.columns, field, what, (f) => this.isIdField(f), `sqlite_table ${this.label}`);
+    const order = col(column(orderField, "order_field"));
+    for (const field of Object.keys(req.scope)) column(field, "scope");
     const where = sql`${this.inScope(sctx)} AND ${compileFilter(filter, this.schema, this.resolver)}`;
-    const gap = req.gap ?? ORDER_GAP;
     const report = sctx?.changedRows;
-    const set = [
-      sql`${order} = __r.__n * ${gap}`,
-      ...(w.version ? [sql`${w.version} = coalesce(${w.version}, 0) + 1`] : []),
-    ];
 
     return this.db.transaction((tx) => {
       const before = report
         ? tx.all<TableRow>(sql`SELECT ${this.columns()} FROM ${this.from} WHERE ${where}`)
         : [];
-      // The subquery has only __rid and __n: every bare column of SET and WHERE is the table's.
-      const written = tx.all<{ __id: string }>(sql`
-        UPDATE ${w.table} SET ${sql.join(set, sql`, `)}
-        FROM (
-          SELECT ${w.id} AS __rid,
-                 ROW_NUMBER() OVER (ORDER BY ${order} ASC NULLS LAST, ${w.id} ASC) AS __n
-          FROM ${this.from}
-          WHERE ${where}
-        ) AS __r
-        WHERE ${w.id} = __r.__rid
-        RETURNING CAST(${w.id} AS TEXT) AS __id`);
+      // No joins here: the table's own columns on both sides of the statement.
+      const written = tx.all<{ __id: string }>(
+        reindexUpdate({
+          table: w.table,
+          id: w.id,
+          order,
+          version: w.version,
+          from: this.from,
+          fromId: w.id,
+          fromOrder: order,
+          where,
+          gap: req.gap ?? ORDER_GAP,
+          dialect: sqliteDialect,
+        }),
+      );
       if (report && written.length > 0) {
         const cast = this.resolver.idType === "integer" ? "numeric" : "text";
         const ids = written.map((r) => r.__id);
@@ -858,19 +860,6 @@ export class SqliteTableSource implements Source {
       }
       return written.length;
     });
-  }
-
-  /** The column a `reindex` names `field` by: a writable column of the table, not the id. */
-  private reindexColumn(field: string, what: "order_field" | "scope"): string {
-    const name = this.writes?.columns.get(field);
-    if (name === undefined || (what === "order_field" && this.isIdField(field))) {
-      throw new UdcError(
-        "validation_error",
-        `reindex ${what} ${field} is not a writable column of sqlite_table ${this.label}`,
-        { field },
-      );
-    }
-    return name;
   }
 
   /**
