@@ -479,6 +479,35 @@ ISO form. A datetime another program wrote as `2021-06-01 10:00:00` is served
 as `2021-06-01T10:00:00.000Z`, but filters and sorts compare the stored text,
 so other writers should store the canonical form.
 
+**Copying the file while it is open** (a backup, a vault copied to another
+machine). In WAL mode the committed rows are in the main file _and_ in
+`-wal`; a copy of the main file alone misses the latter. Fold the WAL in
+first with `checkpoint()`, then copy:
+
+```ts
+import { cp } from "node:fs/promises";
+
+const { busy } = await vault.checkpoint(); // TRUNCATE: -wal is 0 bytes afterwards
+if (busy) throw new Error("a reader is still on the WAL; try again"); // after busyTimeoutMs
+await cp("/var/lib/app/vault.db", "/backup/vault.db");
+```
+
+`checkpoint(mode = "TRUNCATE")` takes its turn in the write queue like a
+write (so no transaction of this process is half-way through) and runs
+`PRAGMA wal_checkpoint(<mode>)` on the write connection **outside** a
+transaction — `exec("PRAGMA wal_checkpoint(TRUNCATE)")` cannot: `exec` runs
+in a write transaction, where SQLite refuses a checkpoint ("database table is
+locked"). The answer is `{ busy, log, checkpointed }` as SQLite reports it
+(`log` and `checkpointed` are -1 when the file is not in WAL mode). While a
+reader of another process is on the WAL, it is retried until `busyTimeoutMs`
+and then answered with `busy: true`; waiting for the queue that long is the
+protocol error `busy`, as for a write. `PASSIVE` never waits and never
+truncates. Refused inside a transaction of the same database. Writes that
+arrive after the checkpoint can land in `-wal` again before the copy is done:
+stop writing first if the copy has to be exact (or use SQLite's backup API,
+`VACUUM INTO`, on a connection of your own). `close()` checkpoints too and
+removes `-wal` and `-shm`.
+
 **Ids.** `uuid` (the default) is a TEXT column holding the canonical
 lower-case 36-character form: the source assigns `crypto.randomUUID()` on an
 insert that carries none, checks the shape of one given through a field mapped

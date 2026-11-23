@@ -46,6 +46,15 @@ The write side of `sqlite_table` completed: `mutate_many`, the host's
   weights); `fts5MatchExpression(text)` — the search box's text as a MATCH
   expression FTS5 never refuses (terms quoted and ANDed, the last a prefix; a
   text with no term matches nothing). Default tokenizer `unicode61`.
+- `SqliteDatabase.checkpoint(mode = "TRUNCATE")`: a WAL checkpoint
+  (`PRAGMA wal_checkpoint`) on the write connection, outside a transaction, in
+  its turn of the write queue — for copying a database file while the server
+  keeps it open. Answers `{ busy, log, checkpointed }` (types
+  `SqliteCheckpointMode`, `SqliteCheckpointResult`); a reader of another
+  process still on the WAL after `busyTimeoutMs` is `busy: true`, the queue
+  not free by then the protocol error `busy`. `exec("PRAGMA
+  wal_checkpoint(…)")` could not do it: `exec` runs inside a write
+  transaction, where SQLite refuses a checkpoint.
 
 ## [0.7.0] - 2026-11-23
 
