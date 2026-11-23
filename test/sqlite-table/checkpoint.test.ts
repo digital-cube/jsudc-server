@@ -161,3 +161,64 @@ describe.each(DRIVERS)("checkpoint() on %s", (driver) => {
     expect(await db.checkpoint()).toEqual({ busy: false, log: -1, checkpointed: -1 });
   });
 });
+
+// close(): SQLite checkpoints and deletes -wal / -shm on the close of the LAST connection
+// to the file, and only when that connection can write. The read-only reader has to go
+// first, or the newest commits stay in -wal and a copy of the main file alone lacks them.
+describe.each(DRIVERS)("close() on %s", (driver) => {
+  const copyRows = (file: string): number => {
+    const copy = tempFile("copy.db");
+    copyFileSync(file, copy); // the main file ALONE: no -wal next to the copy
+    const other = new DatabaseSync(copy, { readOnly: true });
+    try {
+      return Number((other.prepare("SELECT count(*) AS n FROM t").get() as { n: number }).n);
+    } finally {
+      other.close();
+    }
+  };
+
+  for (const watch of [false, true]) {
+    it(`folds the WAL into the main file and removes -wal and -shm (watch: ${watch})`, async () => {
+      const file = tempFile("vault.db");
+      const db = await openWith(driver, file, { watch });
+      await db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+      for (let i = 0; i < 5; i++) await db.run(`INSERT INTO t (v) VALUES ('row ${i}')`);
+      await db.get("SELECT count(*) AS n FROM t"); // the reader has been on the WAL
+      expect(walSize(file)).toBeGreaterThan(0);
+
+      db.close();
+
+      expect(existsSync(`${file}-wal`)).toBe(false);
+      expect(existsSync(`${file}-shm`)).toBe(false);
+      expect(copyRows(file)).toBe(5);
+    });
+  }
+
+  it("with another connection still on the file, the commits are folded in anyway", async () => {
+    const file = tempFile("vault.db");
+    const db = await openWith(driver, file);
+    await db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    for (let i = 0; i < 5; i++) await db.run(`INSERT INTO t (v) VALUES ('row ${i}')`);
+    // Another process is in a read transaction on the file: the close of the wrapper's
+    // writer is then not the last close, and SQLite would not checkpoint on its own.
+    const other = rawReader(driver, file);
+    other.exec("BEGIN");
+    other.exec("SELECT count(*) FROM t");
+
+    db.close();
+
+    // -wal stays (the other connection is on it), but its frames are in the main file.
+    expect(existsSync(`${file}-wal`)).toBe(true);
+    expect(copyRows(file)).toBe(5);
+    other.exec("COMMIT");
+    other.close();
+  });
+
+  it("is idempotent, and closes a database that is not in WAL mode", async () => {
+    const db = await openWith(driver, tempFile("vault.db"));
+    db.close();
+    expect(() => db.close()).not.toThrow();
+    const memory = await openWith(driver, "memory");
+    expect(() => memory.close()).not.toThrow();
+  });
+});

@@ -522,8 +522,15 @@ protocol error `busy`, as for a write. `PASSIVE` never waits and never
 truncates. Refused inside a transaction of the same database. Writes that
 arrive after the checkpoint can land in `-wal` again before the copy is done:
 stop writing first if the copy has to be exact (or use SQLite's backup API,
-`VACUUM INTO`, on a connection of your own). `close()` checkpoints too and
-removes `-wal` and `-shm`.
+`VACUUM INTO`, on a connection of your own). `close()` checkpoints too: it
+closes the read connection, runs `wal_checkpoint(TRUNCATE)` on the write
+connection and closes that one last, so SQLite removes `-wal` and `-shm`
+and the main file alone holds every commit. While another process still has
+the file open, `-wal` stays (that process may append to it), but what this
+process committed is in the main file. (Up to 0.8.0 `close()` closed the
+read-only connection last, nothing was folded in, and a copy of the main
+file made after `close()` could lack the newest commits: call
+`await db.checkpoint()` before `close()` there.)
 
 **Ids.** `uuid` (the default) is a TEXT column holding the canonical
 lower-case 36-character form: the source assigns `crypto.randomUUID()` on an
@@ -674,7 +681,7 @@ closes what the vault owns:
 ```ts
 vault.closed = true; // the onRequest guard above: new requests answer 404
 await vault.changes.close(); // ends this feed's open streams; the clients' reconnect gets 404
-for (const db of vault.databases) db.close(); // SqliteDatabase.close(): both connections
+for (const db of vault.databases) db.close(); // SqliteDatabase.close(): checkpoint, both connections
 ```
 
 `ChangeFeed.close()` ends every stream subscribed to that feed and refuses
