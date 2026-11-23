@@ -7,6 +7,63 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-23
+
+`@jsudc/server` imports without `pg`: everything that needs `pg` or a Postgres
+database moves to a second entry, `@jsudc/server/postgres`, and `pg` becomes an
+optional peer. A host that serves only `memory`, `filesystem`, `http_api` and
+`yaml_menu` collections (or a SQLite source of its own) installs no driver.
+Breaking: a Postgres host changes its imports, nothing else.
+
+### Migration
+
+Import these from `@jsudc/server/postgres` instead of `@jsudc/server` (one
+line each; the names, signatures and behaviour are unchanged):
+
+- `connect`, `Db`, `DbHandle`, `Executor`
+- `ensureUdcSchema`, `udcMigrations`, `UDC_MIGRATIONS_DIR`
+- `collectionTable`, `createCollectionTableSql`, `udcSchemaRevisions`
+- `activeSchema`, `writeSchemaRevision`
+- `seedCollection`, `SeedOptions`, `SeedResult`
+- `createPostgresChangeBus`, `PostgresChangeBus`, `PostgresChangeBusOptions`,
+  `encodeNotice`, `DEFAULT_CHANGE_CHANNEL`, `NOTIFY_PAYLOAD_LIMIT`
+- `PostgresJsonbSource`, `PostgresJsonbSourceOptions`
+- `PostgresTableSource`, `PostgresTableSourceOptions`, `TableFieldSpec`,
+  `PostgresTableSearch`
+- `columnResolver`, `ColumnResolverOptions`, `jsonbResolver`
+- `OnMutateHook` (its `tx` is a Postgres `Executor`; `OnMutateResult` and
+  `RowChange` stay in the root entry)
+- `makeSource` when a collection is `postgres_jsonb` or `postgres_table`, or
+  when you pass `db`: the subpath's `makeSource` makes every kind and takes
+  `PostgresSourceDeps` (`SourceDeps` plus `db`). The root entry's `makeSource`
+  makes the other four kinds; `SourceDeps` no longer has `db`.
+
+### Changed
+
+- New subpath export `@jsudc/server/postgres` (`dist/postgres.js`). The root
+  entry imports neither `pg` nor `drizzle-orm/node-postgres`, at runtime or in
+  its `.d.ts`, directly or through another module.
+- `pg` is an optional peer (`peerDependenciesMeta`). `drizzle-orm` stays a
+  required peer: the root entry's SQL compiler (`compileFilter`, `orderBy`, …)
+  and the `mutate_many` helpers build `drizzle-orm` `SQL`, and the dialect
+  work compiles the same filters for SQLite through it. Only `drizzle-orm`'s
+  core is loaded by the root entry; it has no dependencies of its own.
+- The root entry's `makeSource` refuses a `postgres_jsonb` or `postgres_table`
+  collection with an error that names `@jsudc/server/postgres` and `pg`.
+- `wireVersion` stays in the root entry; it and the registry's check of a
+  `postgres_jsonb` schema (`core_fields` empty) no longer go through the
+  Postgres schema store.
+
+### Added
+
+- `PostgresSourceDeps`, `RevisionEdit` and `WriteRevisionOptions` exported
+  from `@jsudc/server/postgres`.
+- `npm run test:no-pg` and a CI job without a database: `npm pack`, the
+  tarball installed in an empty directory (no `pg` there), then the root entry
+  loads a `memory` collection and `buildApp({ swagger: false })` answers
+  `describe` and `list`; importing `@jsudc/server/postgres` there fails on
+  the missing `pg` only.
+
 ## [0.6.0] - 2026-11-23
 
 What a mail client's list views asked for after 0.5.0, on the server side: the
@@ -347,7 +404,9 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/digital-cube/jsudc-server/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/digital-cube/jsudc-server/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/digital-cube/jsudc-server/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/digital-cube/jsudc-server/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/digital-cube/jsudc-server/compare/v0.2.1...v0.3.0

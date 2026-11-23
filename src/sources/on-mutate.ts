@@ -1,5 +1,4 @@
 import type { MutateOp, Row } from "@jsudc/core";
-import type { Executor } from "../db/client.js";
 import type { SourceContext } from "./source.js";
 
 /**
@@ -25,21 +24,14 @@ export interface RowChange {
 }
 
 /**
- * A host's own write, hung on every mutation of a Postgres source. It runs
- * inside the source's transaction, after the source's statement and before
- * `COMMIT`: the database has already accepted the change (constraints, the
- * version check, the row scope) and the row is locked. `tx` runs SQL on that
- * same transaction. Throwing rolls everything back: a `UdcError` is answered
- * to the caller as it is, anything else as `internal` (and logged). A
- * returned row is what the caller receives; the source does not write it.
- *
- * Declared as a method in the options, so a host may type `ctx` as its own
- * context.
+ * A hook as `runOnMutate` calls it, whatever its transaction is: the
+ * Postgres sources' `OnMutateHook` (`@jsudc/server/postgres`) passes an
+ * `Executor`. Kept free of any driver type so the root entry stays so.
  */
-export type OnMutateHook<Ctx = unknown> = (
+export type MutateHookOn<Tx, Ctx = unknown> = (
   ctx: Ctx,
   change: RowChange,
-  tx: Executor,
+  tx: Tx,
 ) => OnMutateResult;
 
 /** What a hook returns: nothing (the common case), or the row the caller receives. */
@@ -47,11 +39,11 @@ export type OnMutateHook<Ctx = unknown> = (
 export type OnMutateResult = Row | undefined | void | Promise<Row | undefined | void>;
 
 /** Run `hook` on `change` and answer the row the caller receives. */
-export async function runOnMutate(
-  hook: OnMutateHook,
+export async function runOnMutate<Tx>(
+  hook: MutateHookOn<Tx>,
   sctx: SourceContext | undefined,
   change: RowChange,
-  tx: Executor,
+  tx: Tx,
 ): Promise<Row> {
   const written = (change.after ?? change.before) as Row;
   const returned = await hook(sctx?.ctx, change, tx);

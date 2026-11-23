@@ -19,7 +19,8 @@ import { sql } from "drizzle-orm";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Described } from "../src/describe.js";
 import { createDispatcher } from "../src/dispatcher.js";
-import { encodeCursor, makeSource, PostgresTableSource } from "../src/index.js";
+import { encodeCursor } from "../src/index.js";
+import { makeSource, PostgresTableSource } from "../src/postgres.js";
 import { CollectionRegistry, loadRegistry } from "../src/registry.js";
 import { ids, rejectsWith, useTestDb } from "./helpers.js";
 

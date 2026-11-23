@@ -15,12 +15,12 @@ import {
   decodeSearchCursor,
   encodeSearchCursor,
   MemorySource,
-  PostgresTableSource,
   type SearchIndexQuery,
   type SearchIndexResult,
   type Source,
   withSearchIndex,
 } from "../src/index.js";
+import { PostgresTableSource } from "../src/postgres.js";
 import { CollectionRegistry } from "../src/registry.js";
 import { rejectsWith, useTestDb } from "./helpers.js";
 

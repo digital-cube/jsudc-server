@@ -10,7 +10,8 @@ import {
 import { sql } from "drizzle-orm";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createDispatcher } from "../src/dispatcher.js";
-import { decodeSearchCursor, type PostgresTableSearch, PostgresTableSource } from "../src/index.js";
+import { decodeSearchCursor } from "../src/index.js";
+import { type PostgresTableSearch, PostgresTableSource } from "../src/postgres.js";
 import { CollectionRegistry } from "../src/registry.js";
 import { rejectsWith, useTestDb } from "./helpers.js";
 

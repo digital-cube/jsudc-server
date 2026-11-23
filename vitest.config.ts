@@ -49,7 +49,7 @@ export default defineConfig({
     coverage: {
       include: ["src/**/*.ts"],
       // Re-exports only.
-      exclude: ["src/index.ts"],
+      exclude: ["src/index.ts", "src/postgres.ts"],
       thresholds: { lines: 80, statements: 80, functions: 80, branches: 80 },
     },
     projects: [

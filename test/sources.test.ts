@@ -10,11 +10,12 @@ import { type CollectionAsset, loadRegistry, readCollectionAssets } from "../src
 import {
   filesystemRoot,
   httpSourcesEnabled,
-  makeSource,
+  makeSource as makeDriverlessSource,
   rootEnvVar,
 } from "../src/sources/factory.js";
 import { FilesystemSource } from "../src/sources/filesystem.js";
 import { HttpApiSource } from "../src/sources/http-api.js";
+import { makeSource } from "../src/sources/postgres-factory.js";
 import { PostgresJsonbSource } from "../src/sources/postgres-jsonb.js";
 import { COLLECTIONS_DIR, HTTP_FIXTURES, useTestDb } from "./helpers.js";
 
@@ -64,6 +65,16 @@ describe("source.yaml in the registry", () => {
     expect(() =>
       makeSource(readCollectionAssets(fixtures("sources"))[2] as CollectionAsset, {}),
     ).toThrow(/needs a database/);
+  });
+
+  it("the root entry's makeSource makes the driverless kinds and points a Postgres one at the subpath", () => {
+    const assets = readCollectionAssets(fixtures("sources"));
+    const byName = (n: string) => assets.find((a) => a.name === n) as CollectionAsset;
+    expect(makeDriverlessSource(byName("local"), { env: {} })).toBeInstanceOf(FilesystemSource);
+    expect(makeDriverlessSource(byName("net"), { env: {} })).toBeInstanceOf(HttpApiSource);
+    expect(() => makeDriverlessSource(byName("plain"), {})).toThrow(
+      /plain: a postgres_jsonb collection is made by makeSource from "@jsudc\/server\/postgres" \(npm install pg\)/,
+    );
   });
 
   it("lists source_kind and the sidebar group of every collection", async () => {
