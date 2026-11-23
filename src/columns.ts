@@ -38,7 +38,7 @@ export function placeUnlisted<T extends { field: string }>(
   return out;
 }
 
-/** `hidden: true` on a column config (core 0.5.2; read loosely so an older core parses it too). */
+/** `hidden: true` on a column config (core 0.6.0; read loosely so an older core parses it too). */
 const isHidden = (c: ColumnConfig) => (c as { hidden?: unknown }).hidden === true;
 
 /**

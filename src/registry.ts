@@ -232,7 +232,7 @@ export function loadRegistry(
  * The view's `default_sort` against its schema: a key that is not a sort key,
  * names a field the schema lacks (or has deleted), or repeats a field. Read
  * loosely, so a server on `@jsudc/core` 0.5.0 (whose loose view parse keeps
- * the key) checks it too; core 0.5.2 has the same check as
+ * the key) checks it too; core 0.6.0 has the same check as
  * `defaultSortProblems`, which this becomes once the dependency moves.
  */
 export function viewDefaultSortProblems(view: ViewConfig, schema: SchemaDoc): string[] {

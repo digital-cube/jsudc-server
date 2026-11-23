@@ -125,7 +125,7 @@ export interface Source {
   /**
    * Schema fields the source refuses in a client sort (it answers
    * `validation_error`, as for an unknown field): `describe` leaves them out
-   * of `sortable` (0.5.2). Absent: every field is sortable.
+   * of `sortable` (0.6.0). Absent: every field is sortable.
    */
   readonly notSortable?: readonly string[];
   /** The active schema document, `version` in its wire form (`"v<n>"`). */
