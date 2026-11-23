@@ -438,13 +438,66 @@ const rows = await db.execute(sql`
 | `compileFilter(node, schema, resolve?)`                                                            | a filter tree as a `WHERE` expression; unknown fields and wrong values refused           |
 | `compileSort(sort, schema, resolve?)`                                                              | the sort keys as `SortTerm`s (typed expression and cursor cast)                          |
 | `orderBy(terms, resolve?)`                                                                         | `ORDER BY` the keys, NULLS LAST, then the row id ascending                               |
-| `sortKeyColumns(terms)`                                                                            | the sort values as text (`__k0`, `__k1`, …), selected to build the next cursor           |
+| `sortKeyColumns(terms, resolve?)`                                                                  | the sort values as text (`__k0`, `__k1`, …), selected to build the next cursor           |
 | `cursorPredicate(terms, values, id, resolve?)`                                                     | the rows strictly after a cursor position                                                |
 | `encodeCursor(parts)`, `decodeCursor(c, keys, idType?)`                                            | the cursor codec (base64url JSON, as udc-py); the id is checked against `idType`         |
 | `escapeLike(text)`                                                                                 | a LIKE pattern that matches literally                                                    |
 | `FieldResolver`, `SqlCast`, `SqlIdType`, `SqlArrayForm`, `sqlCastFor`, `codePointOrder`, `idParam` | the resolver contract and its helpers                                                    |
 | `jsonbResolver` (`/postgres`)                                                                      | `postgres_jsonb`'s resolver (`data->>'f'`, a uuid `id`); the default of every `resolve?` |
 | `columnResolver({ fields, id, idType, arrayForms })` (`/postgres`)                                 | the resolver over typed columns that `PostgresTableSource` uses                          |
+| `SqlDialect`, `postgresDialect`, `sqliteDialect`, `dialectOf(resolve)`                             | the SQL text that differs between databases (below)                                      |
+| `sqliteColumnResolver({ fields, id, idType })`, `sqliteQuery(sql)`, `sqliteDateTime(s)`            | a resolver over a SQLite table, the renderer to `?` + params, the stored datetime form   |
+
+### Postgres or SQLite
+
+The compiler is one implementation; a `SqlDialect` spells the pieces that
+differ, and the resolver carries it (`dialect`, `postgresDialect` when
+absent, so every resolver above compiles exactly as before). `orderBy`,
+`sortKeyColumns` and `cursorPredicate` take the resolver; `idParam` and
+`codePointOrder` take a dialect as their last argument.
+
+```ts
+import { DatabaseSync } from "node:sqlite";
+import { compileFilter, sqliteColumnResolver, sqliteQuery } from "@jsudc/server";
+import { sql } from "drizzle-orm";
+
+const db = new DatabaseSync("app.db");
+const resolve = sqliteColumnResolver({
+  fields: { name: sql`name`, n: sql`n`, ok: sql`ok`, at: sql`at`, tags: sql`tags` },
+  id: sql`id`, // INTEGER PRIMARY KEY; idType "integer" is the default
+});
+const q = sqliteQuery(sql`SELECT * FROM people WHERE ${compileFilter(filter, schema, resolve)}`);
+const rows = db.prepare(q.sql).all(...q.params);
+```
+
+| Postgres (`postgresDialect`)               | SQLite (`sqliteDialect`)                                              |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| `$1::numeric`, `$1::date`, …               | `?`, the value converted in JS: booleans 1/0, datetimes to UTC text   |
+| `x COLLATE "C"`                            | `x COLLATE BINARY` (code point order for UTF-8)                       |
+| `x LIKE $1` / `x ILIKE $1`                 | `x GLOB ?` / `lower(x) LIKE lower(?) ESCAPE '\'`                      |
+| `x = ANY($1::text[])`, `x <> ALL(…)`       | `x IN (SELECT value FROM json_each(?))`, `NOT IN`, one JSON parameter |
+| `unnest(col)`, `jsonb_array_elements_text` | `json_each(col)`: an array field is a JSON array in a TEXT column     |
+| `(x)::text AS "__k0"`, `(id::text)`        | `CAST(x AS TEXT)`, `CAST(id AS TEXT)`                                 |
+
+What a SQLite table holds, per field type: `integer`/`year` INTEGER, `decimal`
+NUMERIC (a REAL column keeps `-3` as `-3.0`, whose text is not `-3`), `bool`
+INTEGER 0/1, `date` TEXT `YYYY-MM-DD`, `datetime` TEXT in
+`sqliteDateTime`'s form (UTC, milliseconds, fixed width:
+`2021-05-31T22:00:00.000Z`, so text order is time order; a filter value in
+another offset is normalised the same way before it is bound), arrays and
+`json` TEXT holding JSON, a missing value SQL NULL. Needs SQLite 3.38 or
+newer (JSON built in); `node:sqlite` in Node 24 ships 3.5x.
+
+Two things to know:
+
+- **Case folding is SQL `lower()`**, and SQLite's built-in one folds ASCII
+  only: a case-insensitive `contains "čak"` misses `ČAK`, which
+  `evaluateFilter` finds. Load ICU, or register a Unicode `lower` on the
+  connection: `db.function("lower", { deterministic: true }, (s) => s == null ? null : String(s).toLowerCase())`.
+- **Text order is code point order** in both dialects. JavaScript's `<`
+  compares UTF-16 code units, so a character above U+FFFF (an emoji) sorts
+  before U+E000–U+FFFF (`！`) in `evaluateFilter` and after it in SQL — in
+  Postgres's `COLLATE "C"` and SQLite's `BINARY` alike. Nothing else differs.
 
 ## The SQL the host must run
 

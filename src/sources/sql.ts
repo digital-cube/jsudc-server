@@ -13,6 +13,9 @@ import {
 import { type SQL, sql } from "drizzle-orm";
 import type { CursorValue } from "./cursor.js";
 import { allowedCondition, allowedField } from "./fields.js";
+import { postgresDialect, type SqlDialect } from "./sql-dialect.js";
+
+export { escapeLike, postgresDialect, type SqlDialect, type SqlTextOp } from "./sql-dialect.js";
 
 // Every function here takes field names only after `allowedField` let them
 // through (schema allowlist + FIELD_NAME_RE), so a resolver may write them
@@ -52,6 +55,13 @@ export interface FieldResolver {
   /** The row id: the `ORDER BY` tiebreaker, the cursor's last key, the `id` filter. */
   readonly id: SQL;
   readonly idType: SqlIdType;
+  /** The SQL the compiler writes around these expressions; `postgresDialect` when absent. */
+  readonly dialect?: SqlDialect | undefined;
+}
+
+/** The dialect a resolver compiles for. */
+export function dialectOf(resolve: FieldResolver): SqlDialect {
+  return resolve.dialect ?? postgresDialect;
 }
 
 /** The cast a field's filter values and cursor values take, by its type. */
@@ -83,13 +93,13 @@ function textExpr(field: string): SQL {
  * Text compared and sorted by code point, whatever the database's collation:
  * evaluateFilter compares strings with `<`, and under a linguistic collation
  * (`en_US.utf8`, the postgres image's default) `'beta' > 'Gama'` would hold
- * in SQL and not in memory.
+ * in SQL and not in memory. Postgres: `COLLATE "C"`; SQLite: `COLLATE BINARY`.
  */
-export function codePointOrder(expr: SQL): SQL {
-  return sql`(${expr} COLLATE "C")`;
+export function codePointOrder(expr: SQL, dialect: SqlDialect = postgresDialect): SQL {
+  return dialect.codePointOrder(expr);
 }
 
-const codePoint = codePointOrder;
+const codePoint = (expr: SQL) => postgresDialect.codePointOrder(expr);
 
 /**
  * The typed expression comparisons and ORDER BY use, and the expression
@@ -127,15 +137,9 @@ export const jsonbResolver: FieldResolver = {
   idType: "uuid",
 };
 
-const ID_CAST: Record<SqlIdType, string> = { uuid: "uuid", text: "text", integer: "bigint" };
-
-/** A row id as a parameter of its type (`$1::uuid`, `$1::bigint`, `$1::text`). */
-export function idParam(id: string, idType: SqlIdType): SQL {
-  return sql`${id}::${sql.raw(ID_CAST[idType])}`;
-}
-
-function param(value: unknown, cast: Cast): SQL {
-  return sql`${value}::${sql.raw(cast)}`;
+/** A row id as a parameter of its type (Postgres: `$1::uuid`, `$1::bigint`, `$1::text`). */
+export function idParam(id: string, idType: SqlIdType, dialect: SqlDialect = postgresDialect): SQL {
+  return dialect.idParam(id, idType);
 }
 
 const isMissing = (v: unknown) => v === null || v === undefined;
@@ -171,11 +175,6 @@ function scalarText(value: unknown, field: string, op: string): string {
   throw badValue(field, op, "a scalar value");
 }
 
-/** Escape the LIKE metacharacters so the value matches literally. */
-export function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
-}
-
 const COMPARE: Partial<Record<Condition["op"], string>> = {
   eq: "=",
   neq: "<>",
@@ -184,8 +183,6 @@ const COMPARE: Partial<Record<Condition["op"], string>> = {
   lt: "<",
   lte: "<=",
 };
-
-const NULL = sql`NULL::boolean`;
 
 const ARRAY_TYPES: ReadonlySet<FieldDef["type"]> = new Set(["string_array", "lookup_array"]);
 
@@ -196,41 +193,33 @@ const ARRAY_TYPES: ReadonlySet<FieldDef["type"]> = new Set(["string_array", "loo
  */
 function compileArrayCondition(cond: Condition, def: FieldDef, resolve: FieldResolver): SQL {
   const { field, op, value } = cond;
+  const dialect = dialectOf(resolve);
   const { expr: arr, form } = resolve.array(field, def);
   const ci = cond.case_insensitive === true;
   const el = sql.raw(ci ? "lower(e.el)" : "e.el");
   let test: SQL;
   if (op === "contains" || op === "starts_with" || op === "ends_with") {
-    if (isMissing(value)) return NULL;
-    const text = escapeLike(scalarText(value, field, op));
-    const pattern =
-      op === "contains" ? `%${text}%` : op === "starts_with" ? `${text}%` : `%${text}`;
-    test = sql`e.el ${sql.raw(ci ? "ILIKE" : "LIKE")} ${pattern}::text`;
+    if (isMissing(value)) return dialect.unknown;
+    test = dialect.textMatch(sql.raw("e.el"), op, scalarText(value, field, op), ci);
   } else if (op === "in" || op === "not_in") {
     if (!Array.isArray(value)) throw badValue(field, op, "an array");
     const items = value
       .filter((v) => !isMissing(v))
       .map((v) => scalarText(v, field, op))
       .map((v) => (ci ? v.toLowerCase() : v));
-    test = sql`${el} = ANY(${sql.param(items)}::text[])`;
+    test = dialect.anyOf(el, items, "text");
   } else {
     throw new UdcError("unsupported_op", `${op} is not supported on the array field ${field}`, {
       field,
       op,
     });
   }
-  if (form === "text[]") {
-    // Any element type, compared as text, as the jsonb elements are.
-    const elems = sql`(SELECT u.v::text AS el FROM unnest(${arr}) AS u(v)) AS e`;
-    const exists = sql`EXISTS (SELECT 1 FROM ${elems} WHERE ${test})`;
-    return sql`(CASE WHEN ${arr} IS NOT NULL THEN ${op === "not_in" ? sql`NOT ${exists}` : exists} ELSE NULL END)`;
-  }
-  const exists = sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${arr}) AS e(el) WHERE ${test})`;
-  return sql`(CASE WHEN jsonb_typeof(${arr}) = 'array' THEN ${op === "not_in" ? sql`NOT ${exists}` : exists} ELSE NULL END)`;
+  return dialect.arrayHas(arr, form, test, op === "not_in");
 }
 
 function compileCondition(cond: Condition, def: FieldDef, resolve: FieldResolver): SQL {
   const { field, op, value } = cond;
+  const dialect = dialectOf(resolve);
   const asText = resolve.text(field, def);
 
   if (op === "is_null") return sql`(${asText} IS NULL)`;
@@ -238,31 +227,28 @@ function compileCondition(cond: Condition, def: FieldDef, resolve: FieldResolver
   if (ARRAY_TYPES.has(def.type)) return compileArrayCondition(cond, def, resolve);
 
   if (op === "contains" || op === "starts_with" || op === "ends_with") {
-    if (isMissing(value)) return NULL;
-    const text = escapeLike(scalarText(value, field, op));
-    const pattern =
-      op === "contains" ? `%${text}%` : op === "starts_with" ? `${text}%` : `%${text}`;
-    const like = sql.raw(cond.case_insensitive ? "ILIKE" : "LIKE");
-    return sql`(${asText} ${like} ${pattern}::text)`;
+    if (isMissing(value)) return dialect.unknown;
+    const ci = cond.case_insensitive === true;
+    return sql`(${dialect.textMatch(asText, op, scalarText(value, field, op), ci)})`;
   }
 
   const cast = castFor(def);
   // case_insensitive only means something for text comparisons, as in evaluateFilter.
   const ci = cond.case_insensitive === true && cast === "text";
   // lower() under the database's collation (a "C" lower() folds ASCII only), then code point order.
-  const lhs = ci ? codePoint(sql`lower(${asText})`) : resolve.typed(field, def, cast);
+  const lhs = ci ? dialect.codePointOrder(sql`lower(${asText})`) : resolve.typed(field, def, cast);
   const rhs = (v: unknown) => {
-    const p = param(coerce(v, cast, field, op), cast);
+    const p = dialect.param(coerce(v, cast, field, op), cast);
     return ci ? sql`lower(${p})` : p;
   };
 
   const cmp = COMPARE[op];
-  if (cmp) return isMissing(value) ? NULL : sql`(${lhs} ${sql.raw(cmp)} ${rhs(value)})`;
+  if (cmp) return isMissing(value) ? dialect.unknown : sql`(${lhs} ${sql.raw(cmp)} ${rhs(value)})`;
 
   if (op === "between") {
     if (!Array.isArray(value) || value.length !== 2) throw badValue(field, op, "[lo, hi]");
     const [lo, hi] = value;
-    if (isMissing(lo) || isMissing(hi)) return NULL;
+    if (isMissing(lo) || isMissing(hi)) return dialect.unknown;
     return sql`(${lhs} BETWEEN ${rhs(lo)} AND ${rhs(hi)})`;
   }
 
@@ -273,11 +259,9 @@ function compileCondition(cond: Condition, def: FieldDef, resolve: FieldResolver
       .filter((v) => !isMissing(v))
       .map((v) => coerce(v, cast, field, op))
       .map((v) => (ci ? String(v).toLowerCase() : v));
-    // One array parameter: a bare JS array would expand into a value list.
-    const arr = sql`${sql.param(items)}::${sql.raw(cast)}[]`;
-    if (op === "in") return sql`(${lhs} = ANY(${arr}))`;
-    // `x <> ALL('{}')` is true even for a NULL x: keep a missing value UNKNOWN.
-    return sql`(CASE WHEN ${lhs} IS NULL THEN NULL ELSE ${lhs} <> ALL(${arr}) END)`;
+    if (op === "in") return sql`(${dialect.anyOf(lhs, items, cast)})`;
+    // `x <> ALL('{}')` (`x NOT IN ()`) is true even for a NULL x: keep a missing value UNKNOWN.
+    return sql`(CASE WHEN ${lhs} IS NULL THEN NULL ELSE ${dialect.noneOf(lhs, items, cast)} END)`;
   }
 
   throw new UdcError("unsupported_op", `unsupported filter op: ${String(op)}`, { field, op });
@@ -290,17 +274,20 @@ function compileCondition(cond: Condition, def: FieldDef, resolve: FieldResolver
  */
 function compileIdCondition(cond: Condition, resolve: FieldResolver): SQL {
   const { field, op, value } = cond;
-  const id = sql`(${resolve.id}::text)`;
+  const dialect = dialectOf(resolve);
+  const id = dialect.idText(resolve.id);
   if (op === "is_null") return sql`(${id} IS NULL)`;
   if (op === "is_not_null") return sql`(${id} IS NOT NULL)`;
   if (op === "eq" || op === "neq") {
-    if (isMissing(value)) return NULL;
-    return sql`(${id} ${sql.raw(op === "eq" ? "=" : "<>")} ${scalarText(value, field, op)}::text)`;
+    if (isMissing(value)) return dialect.unknown;
+    const text = dialect.param(scalarText(value, field, op), "text");
+    return sql`(${id} ${sql.raw(op === "eq" ? "=" : "<>")} ${text})`;
   }
   if (!Array.isArray(value)) throw badValue(field, op, "an array");
   const items = value.filter((v) => !isMissing(v)).map((v) => scalarText(v, field, op));
-  const arr = sql`${sql.param(items)}::text[]`;
-  return op === "in" ? sql`(${id} = ANY(${arr}))` : sql`(${id} <> ALL(${arr}))`;
+  return op === "in"
+    ? sql`(${dialect.anyOf(id, items, "text")})`
+    : sql`(${dialect.noneOf(id, items, "text")})`;
 }
 
 /**
@@ -365,10 +352,14 @@ export function orderBy(terms: SortTerm[], resolve: FieldResolver = jsonbResolve
   return sql.join([...keys, sql`${resolve.id} ASC`], sql`, `);
 }
 
-/** The sort values as text, selected next to each row so the next cursor can be built. */
-export function sortKeyColumns(terms: SortTerm[]): SQL {
+/**
+ * The sort values as text, selected next to each row so the next cursor can
+ * be built (`__k0`, `__k1`, …). `resolve` gives the dialect, as for `orderBy`.
+ */
+export function sortKeyColumns(terms: SortTerm[], resolve: FieldResolver = jsonbResolver): SQL {
+  const dialect = dialectOf(resolve);
   return sql.join(
-    terms.map((t, i) => sql`(${t.expr})::text AS ${sql.identifier(`__k${i}`)}`),
+    terms.map((t, i) => sql`${dialect.sortKeyText(t.expr)} AS ${sql.identifier(`__k${i}`)}`),
     sql`, `,
   );
 }
@@ -397,9 +388,10 @@ export function cursorPredicate(
   id: string,
   resolve: FieldResolver = jsonbResolver,
 ): SQL {
-  const value = (i: number) => param(values[i], (terms[i] as SortTerm).cast);
+  const dialect = dialectOf(resolve);
+  const value = (i: number) => dialect.param(values[i], (terms[i] as SortTerm).cast);
   const idCol = resolve.id;
-  const idParam_ = idParam(id, resolve.idType);
+  const idParam_ = dialect.idParam(id, resolve.idType);
   const equal = (i: number) =>
     values[i] === null ? sql`(${terms[i]?.expr} IS NULL)` : sql`(${terms[i]?.expr} = ${value(i)})`;
   const prefixEqual = (i: number) => terms.slice(0, i).map((_, j) => equal(j));

@@ -47,7 +47,8 @@ line each; the names, signatures and behaviour are unchanged):
   required peer: the root entry's SQL compiler (`compileFilter`, `orderBy`, …)
   and the `mutate_many` helpers build `drizzle-orm` `SQL`, and the dialect
   work compiles the same filters for SQLite through it. Only `drizzle-orm`'s
-  core is loaded by the root entry; it has no dependencies of its own.
+  core and its driver-free `sqlite-core` (the SQLite renderer) are loaded by
+  the root entry; neither has dependencies of its own.
 - The root entry's `makeSource` refuses a `postgres_jsonb` or `postgres_table`
   collection with an error that names `@jsudc/server/postgres` and `pg`.
 - `wireVersion` stays in the root entry; it and the registry's check of a
@@ -56,6 +57,19 @@ line each; the names, signatures and behaviour are unchanged):
 
 ### Added
 
+- A dialect in the SQL compiler: `compileFilter`, `compileSort`, `orderBy`,
+  `cursorPredicate`, `sortKeyColumns` and `idParam` compile the same filter,
+  sort and keyset cursor for Postgres or SQLite. `SqlDialect`,
+  `postgresDialect` (the default: the Postgres text of every existing caller
+  is byte-identical, pinned by `test/sql-postgres-golden.test.ts`) and
+  `sqliteDialect`; a `FieldResolver` carries its `dialect`. `sortKeyColumns`
+  takes the resolver as an optional second argument, `idParam` and
+  `codePointOrder` a dialect as an optional last one.
+- `sqliteColumnResolver`, `sqliteQuery` (a compiled `SQL` as `?` text +
+  params, through drizzle's SQLite renderer; no drizzle database object),
+  `sqliteDateTime` (the stored and bound datetime form) and `escapeGlob`. The
+  jsonb read suites (`pg-filter`, `pg-paging`, `pg-parity`, `pg-array`,
+  `pg-allowlist`) run a third time against SQLite `:memory:` (`node:sqlite`).
 - `PostgresSourceDeps`, `RevisionEdit` and `WriteRevisionOptions` exported
   from `@jsudc/server/postgres`.
 - `npm run test:no-pg` and a CI job without a database: `npm pack`, the

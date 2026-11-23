@@ -24,6 +24,25 @@ const tableDouble = [
 ];
 
 /**
+ * The jsonb read suites, run a third time against the SQL compiler's SQLite dialect in
+ * `node:sqlite` `:memory:` (see test/sqlite-double).
+ */
+const SQLITE_SUITES = [
+  "test/pg-filter.test.ts",
+  "test/pg-paging.test.ts",
+  "test/pg-parity.test.ts",
+  "test/pg-array.test.ts",
+  "test/pg-allowlist.test.ts",
+];
+
+const sqliteDouble = [
+  {
+    find: /^\.\.\/src\/sources\/postgres-jsonb\.js$/,
+    replacement: fileURLToPath(new URL("./test/sqlite-double/postgres-jsonb.ts", import.meta.url)),
+  },
+];
+
+/**
  * The jsonb mutate suite, against `postgres_table` too. Its `schema revisions` block is
  * about the jsonb source's revision store (a `postgres_table` serves its schema.json, no
  * revisions) and the jsonb constructor's checks: it does not run here.
@@ -80,6 +99,15 @@ export default defineConfig({
           include: TABLE_MUTATE_SUITES,
           sequence: { groupOrder: 2 },
           ...skipJsonbOnly,
+        },
+      },
+      {
+        extends: true,
+        resolve: { alias: sqliteDouble },
+        test: {
+          name: "sqlite",
+          include: SQLITE_SUITES,
+          sequence: { groupOrder: 3 },
         },
       },
     ],
