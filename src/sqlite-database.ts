@@ -6,7 +6,7 @@
 // `:memory:`) one read connection that never waits for a writer (WAL).
 //
 // No driver is imported here: a `SqliteConnection` adapts one (`node:sqlite`
-// in `./sqlite-node.ts`; `better-sqlite3` can follow).
+// in `./sqlite-node.ts`, `better-sqlite3` in `./better-sqlite3.ts`).
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { UdcError } from "@jsudc/core";

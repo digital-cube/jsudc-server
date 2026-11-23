@@ -7,6 +7,32 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+The write side of `sqlite_table` completed: `mutate_many`, the host's
+`onMutate` hook, and a second driver. Nothing changes for a Postgres host.
+
+### Added
+
+- `sqlite_table` serves `mutate_many` (`capabilities.mutate_many: true` when
+  the source writes), as `postgres_table` does: one `BEGIN IMMEDIATE`
+  transaction, the patch validated before anything is written, by ids or by
+  filter (+ `except_ids`) inside the base `where` and the row scope, the
+  dispatcher's `limit` refused before any write, each version bumped, the
+  rows checked in scope after the write, all or nothing. A patch writing the
+  id column is a `validation_error`. The rows as they were and as they are go
+  to `changedRows`, so the change feed names them.
+- `onMutate(ctx, change, tx)` on `SqliteTableSource` (typed
+  `SqliteOnMutateHook`): after the source's statement and before `COMMIT`, on
+  every `mutate` and on every row of a `mutate_many`; `tx` is a
+  `SqliteExecutor` on the write connection; a throw rolls everything back. The
+  hook may be async: the wrapper keeps its write queue and the file's write
+  lock while it awaits, so **a slow hook holds every other writer of the file,
+  in this process and in others** (they wait, then get `busy` after
+  `busyTimeoutMs`).
+- `@jsudc/server/better-sqlite3`: `openBetterSqlite(path, opts)` and
+  `betterSqliteConnection(db)`, the `better-sqlite3` adapter of
+  `SqliteDatabase` (same options as `openNodeSqlite`). `better-sqlite3` is a
+  new optional peer, loaded only by that entry when it opens a file.
+
 ## [0.7.0] - 2026-11-23
 
 Three pieces of work, released together with `@jsudc/core` 0.7.0 and

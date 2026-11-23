@@ -112,7 +112,7 @@ describe("a sqlite_table collection over HTTP", () => {
     expect(Object.keys(schema.fields).sort()).toEqual(["body", "pinned", "tags", "title"]);
     expect(res.payload.capabilities).toMatchObject({
       mutate: true,
-      mutate_many: false,
+      mutate_many: true,
       reindex: true,
       total_count: true,
       paging: ["cursor", "offset"],

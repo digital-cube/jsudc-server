@@ -6,6 +6,7 @@
 // host needs one import.
 
 export {
+  type SqliteOnMutateHook,
   type SqliteTableFieldSpec,
   SqliteTableSource,
   type SqliteTableSourceOptions,
