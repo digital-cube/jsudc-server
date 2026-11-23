@@ -6,8 +6,9 @@
 // must answer `describe` and `list`. A `sqlite_table` collection over a
 // file opened with `@jsudc/server/sqlite` (node:sqlite) must answer
 // `describe`, `list` and `mutate` under a row scope. `@jsudc/server/postgres`
-// must fail on the missing `pg` and nothing else. No database server is
-// needed.
+// must fail on the missing `pg` and nothing else. `@jsudc/server/better-sqlite3`
+// must import without `better-sqlite3`, and `openBetterSqlite` say it is
+// missing. No database server is needed.
 //
 // Needs the npm registry (or a warm npm cache) for the peers. TMPDIR moves
 // the temp directory. NO_PG_CORE_DIR=<a @jsudc/core checkout> installs that
@@ -174,8 +175,22 @@ try {
 } catch (err) {
   postgres = { code: err.code, message: err.message };
 }
+// The better-sqlite3 entry imports without its optional peer; opening a file names it.
+const better = {};
+try {
+  const entry = await import("@jsudc/server/better-sqlite3");
+  better.imported = typeof entry.openBetterSqlite === "function";
+  try {
+    entry.openBetterSqlite(":memory:");
+    better.opened = true;
+  } catch (err) {
+    better.message = err.message;
+  }
+} catch (err) {
+  better.importError = err.message;
+}
 await app.close();
-console.log(JSON.stringify({ describe, list, sqlite, postgres }));
+console.log(JSON.stringify({ describe, list, sqlite, postgres, better }));
 `,
   );
   const out = JSON.parse(run(process.execPath, ["main.mjs"], host).trim().split("\n").pop());
@@ -205,10 +220,13 @@ console.log(JSON.stringify({ describe, list, sqlite, postgres }));
   assert.equal(sq.owner, "ana");
   assert.equal(out.postgres.code, "ERR_MODULE_NOT_FOUND", JSON.stringify(out.postgres));
   assert.match(out.postgres.message, /'pg'/);
+  assert.equal(out.better.imported, true, JSON.stringify(out.better));
+  assert.match(out.better.message ?? "", /npm install better-sqlite3/, JSON.stringify(out.better));
 
   console.log("ok: @jsudc/server without pg — root entry, memory registry, describe and list");
   console.log("ok: sqlite_table over node:sqlite — describe, list, mutate under a row scope");
   console.log("ok: @jsudc/server/postgres without pg fails on the missing 'pg' only");
+  console.log("ok: @jsudc/server/better-sqlite3 imports without it; openBetterSqlite names it");
 } finally {
   if (keep) console.log(`kept ${work}`);
   else rmSync(work, { recursive: true, force: true });

@@ -14,6 +14,7 @@ import {
 import { type SQL, sql } from "drizzle-orm";
 import { rowScopePins, withoutFields } from "../scope.js";
 import type { SqliteDatabase, SqliteExecutor } from "../sqlite-database.js";
+import { missing, tooManyRows } from "./bulk.js";
 import { type CursorValue, decodeCursor, encodeCursor, isIdOfType, isUuid } from "./cursor.js";
 import {
   assertQueryFields,
@@ -22,15 +23,18 @@ import {
   versionConflict,
   withoutMeta,
 } from "./fields.js";
+import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
 import { assertSearchable, searchText } from "./search.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_ORDER_FIELD,
   DEFAULT_PAGE_SIZE,
+  type MutateManyResult,
   type Source,
   type SourceAddField,
   type SourceContext,
   type SourceListRequest,
+  type SourceMutateMany,
   type SourceMutation,
   type SourceReindex,
   type SourceUpdateField,
@@ -98,6 +102,11 @@ export interface SqliteTableSourceOptions {
   versionColumn?: string | undefined;
   /** `true`: never written (`capabilities.mutate: false`). */
   readOnly?: boolean | undefined;
+  /**
+   * A host's own write on every mutation, in the same transaction, after the
+   * source's statement and before `COMMIT`; see `SqliteOnMutateHook`.
+   */
+  onMutate?(ctx: unknown, change: RowChange, tx: SqliteExecutor): OnMutateResult;
   /** A condition (SQL, from code) ANDed into every statement. */
   where?: SQL | string | undefined;
   /** `false`: no `count(*)` next to the page; `total` is `null`. Default `true`. */
@@ -112,6 +121,29 @@ export interface SqliteTableSourceOptions {
    */
   defaultSort?: readonly SortKey[] | undefined;
 }
+
+/**
+ * A host's own write, hung on every mutation of a `sqlite_table` source
+ * (`mutate`, and each row of `mutate_many`). It runs inside the source's
+ * transaction, after the source's statement and before `COMMIT`: the
+ * database has accepted the change (constraints, the version check, the row
+ * scope). `tx` runs statements on the write connection, in that transaction;
+ * so does anything the hook awaits through the same `SqliteDatabase` (its
+ * `run`, `transaction` — a `SAVEPOINT` — or `proxy`). Throwing rolls
+ * everything back: a `UdcError` is answered as it is, anything else as
+ * `internal` (and logged). A returned row is what the caller receives; the
+ * source does not write it.
+ *
+ * The hook may be async, but the file has one writer: while it awaits, the
+ * write queue and the file's write lock are held, so every other writer of
+ * the file — in this process and in others — waits (and is answered `busy`
+ * after `busyTimeoutMs`). Keep it short; do slow work after the response.
+ */
+export type SqliteOnMutateHook<Ctx = unknown> = (
+  ctx: Ctx,
+  change: RowChange,
+  tx: SqliteExecutor,
+) => OnMutateResult;
 
 const IDENT_PART = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
 
@@ -250,9 +282,10 @@ export function sqliteVersionTriggerSql(opts: {
  * columns: the filter operators, sort, keyset cursor and offset paging of
  * `postgres_table`, through the same compiler with the SQLite dialect. It
  * writes the plain columns of its table: insert, partial update and delete,
- * each in a `BEGIN IMMEDIATE` transaction of the shared `SqliteDatabase`,
- * with the row scope and the version check in the `WHERE` of the statement;
- * computed and read-only fields are refused. The schema is the collection's
+ * and `mutate_many`, each in a `BEGIN IMMEDIATE` transaction of the shared
+ * `SqliteDatabase`, with the row scope and the version check in the `WHERE`
+ * of the statement; computed and read-only fields are refused. A host's
+ * `onMutate` takes part in every write. The schema is the collection's
  * `schema.json`.
  *
  * The storage per field type is `sqliteColumnResolver`'s (INTEGER, NUMERIC,
@@ -287,6 +320,7 @@ export class SqliteTableSource implements Source {
   private readonly writes: WritePlan | null;
   private readonly writeSchema: SchemaDoc;
   private readonly defaultSort: SortKey[] | undefined;
+  private readonly onMutate: SqliteTableSourceOptions["onMutate"];
 
   constructor(opts: SqliteTableSourceOptions) {
     const schema = opts.schema;
@@ -365,6 +399,7 @@ export class SqliteTableSource implements Source {
         }
       }
     }
+    this.onMutate = opts.onMutate;
     this.writeSchema = withoutFields(schema, new Set(readOnly));
     this.filterSchema = withUnknown(schema, notFilterable);
     this.sortSchema = withUnknown(schema, notSortable);
@@ -384,7 +419,7 @@ export class SqliteTableSource implements Source {
     });
     this.capabilities = {
       mutate: this.writes !== null,
-      mutate_many: false,
+      mutate_many: this.writes !== null,
       subscribe: false,
       total_count: this.totalCount,
       schema_edit: false,
@@ -467,6 +502,7 @@ export class SqliteTableSource implements Source {
    * scope), check the version, and update / delete with the id, the version,
    * the base `where` and the row scope in the statement's `WHERE`. The row
    * written is read back in scope; a row that left it rolls everything back.
+   * Then `onMutate`, before `COMMIT`; its failure rolls back too.
    */
   async mutate(m: SourceMutation, sctx?: SourceContext): Promise<Row> {
     const w = this.writes;
@@ -474,7 +510,7 @@ export class SqliteTableSource implements Source {
     const pins = rowScopePins(sctx?.rowScope);
     if (m.op === "insert") {
       const row = this.writable({ ...withoutMeta(m.row ?? {}), ...pins }, pins, "insert");
-      return this.db.transaction((tx) => {
+      return this.db.transaction(async (tx) => {
         const names: SQL[] = [];
         const values: SQL[] = [];
         let idAt = -1;
@@ -504,7 +540,9 @@ export class SqliteTableSource implements Source {
             : sql`INSERT INTO ${w.table} (${sql.join(names, sql`, `)})
                 VALUES (${sql.join(values, sql`, `)}) RETURNING CAST(${w.id} AS TEXT) AS __id`,
         );
-        return this.readBack(tx, (inserted as { __id: string }).__id, sctx);
+        const after = this.readBack(tx, (inserted as { __id: string }).__id, sctx);
+        const id = after.__meta.id;
+        return this.finish(tx, sctx, { op: "insert", id, before: null, after, patch: row });
       });
     }
 
@@ -518,13 +556,14 @@ export class SqliteTableSource implements Source {
     if (key === null) throw notFound(id);
     const keyText = this.resolver.idType === "uuid" ? id.toLowerCase() : id;
 
-    return this.db.transaction((tx) => {
+    return this.db.transaction(async (tx) => {
       // The write lock is held since BEGIN IMMEDIATE: no other writer changes the row until COMMIT.
       // Outside the scope (or the base `where`) the row does not exist for this request.
       const current = tx.get<TableRow>(sql`
         SELECT ${this.columns()} FROM ${this.from}
         WHERE ${this.resolver.id} = ${key} AND ${this.inScope(sctx)}`);
       if (!current) throw notFound(id);
+      const before = this.serialize(current);
       const expected = w.version ? m.expected_version : undefined;
       if (expected !== undefined && current.__version !== expected) {
         throw versionConflict(id, expected, current.__version);
@@ -537,7 +576,8 @@ export class SqliteTableSource implements Source {
       if (m.op === "delete") {
         const res = tx.run(sql`DELETE FROM ${w.table} WHERE ${target}`);
         if (res.changes !== 1) throw this.lost(tx, id, key, expected);
-        return this.serialize(current);
+        const rowId = before.__meta.id;
+        return this.finish(tx, sctx, { op: "delete", id: rowId, before, after: null, patch: null });
       }
       const set = [
         ...Object.keys(patch ?? {}).map(
@@ -551,8 +591,154 @@ export class SqliteTableSource implements Source {
       }
       // A patch that changes the id column moves the row: read it back under its new id.
       const moved = this.newIdIn(patch);
-      return this.readBack(tx, moved ?? keyText, sctx);
+      const after = this.readBack(tx, moved ?? keyText, sctx);
+      return this.finish(tx, sctx, {
+        op: "update",
+        id: after.__meta.id,
+        before,
+        after,
+        patch: patch ?? {},
+      });
     });
+  }
+
+  /**
+   * `mutate_many` in one `BEGIN IMMEDIATE` transaction: the file's write lock
+   * is held from the first statement to `COMMIT`, so the rows read are the
+   * rows written. The patch (read-only fields refused, as in `mutate`; the id
+   * column refused) and the filter are checked first. The target rows — the
+   * ids, or the filter minus `except_ids`, inside the base `where` and the
+   * row scope, at most `limit + 1` so a filter reaching more is refused before
+   * anything is written — are read in id order. Without `onMutate` one
+   * `UPDATE` / `DELETE` writes them all, the version bumped, and a count
+   * checks they are all still in scope. With it, row by row, each read back in
+   * scope and then handed to the hook. A row leaving the scope, or a hook
+   * failure, rolls the whole request back. With `changedRows` the rows as they
+   * were and as they are now are handed over, so the change feed names them.
+   */
+  async mutateMany(req: SourceMutateMany, sctx?: SourceContext): Promise<MutateManyResult> {
+    const w = this.writes;
+    if (!w) throw this.readOnly("mutate_many");
+    const pins = rowScopePins(sctx?.rowScope);
+    const patch =
+      req.op === "update"
+        ? this.writable(pinned(withoutMeta(req.row ?? {}), pins), pins, "patch")
+        : null;
+    for (const field of Object.keys(patch ?? {})) {
+      if (this.isIdField(field)) {
+        throw new UdcError(
+          "validation_error",
+          `invalid row: ${field} is the row id; mutate_many does not change it`,
+          { problems: [{ field, message: "is the row id; mutate_many does not change it" }] },
+        );
+      }
+    }
+    assertQueryFields(this.filterSchema, req.filter, undefined);
+    const r = this.resolver;
+    const cast = r.idType === "integer" ? "numeric" : "text";
+    const canonical = (id: string) => (r.idType === "uuid" ? id.toLowerCase() : id);
+    const requested = req.ids ?? [];
+    let target: SQL;
+    if (req.ids) {
+      const ids = req.ids.filter((id) => isIdOfType(id, r.idType)).map(canonical);
+      if (ids.length === 0) return { updated: 0, failed: missing(requested, new Set()) };
+      target = sqliteDialect.anyOf(r.id, ids, cast);
+    } else {
+      const except = (req.except_ids ?? []).filter((id) => isIdOfType(id, r.idType));
+      const filter = compileFilter(req.filter, this.filterSchema, r);
+      target =
+        except.length === 0
+          ? filter
+          : sql`${filter} AND NOT (${sqliteDialect.anyOf(r.id, except.map(canonical), cast)})`;
+    }
+    const where = sql`(${target}) AND ${this.inScope(sctx)}`;
+    const collection = sctx?.collection ?? this.label;
+    const set = patch
+      ? [
+          ...Object.keys(patch).map(
+            (f) => sql`${col(w.columns.get(f) as string)} = ${this.writeValue(f, patch[f])}`,
+          ),
+          ...(w.version ? [sql`${w.version} = coalesce(${w.version}, 0) + 1`] : []),
+        ]
+      : [];
+    const hook = this.onMutate;
+    const report = sctx?.changedRows;
+
+    return this.db.transaction(async (tx) => {
+      // Under the write lock since BEGIN IMMEDIATE: what is read here stays so until COMMIT.
+      const current = tx.all<TableRow>(sql`
+        SELECT ${this.columns()} FROM ${this.from}
+        WHERE ${where}
+        ORDER BY ${r.id}
+        LIMIT ${req.limit + 1}`);
+      if (current.length > req.limit) {
+        throw tooManyRows(collection, req.limit, req.ids ? "ids" : "filter");
+      }
+      const found = new Set(current.map((row) => row.__id));
+      const failed = req.ids
+        ? missing(requested, new Set(requested.filter((id) => found.has(canonical(id)))))
+        : [];
+      if (current.length === 0) return { updated: 0, failed };
+      const before = current.map((row) => this.serialize(row));
+
+      if (!hook) {
+        const these = sqliteDialect.anyOf(w.id, [...found], cast);
+        if (req.op === "delete") {
+          tx.run(sql`DELETE FROM ${w.table} WHERE ${these}`);
+          report?.(before);
+          return { updated: current.length, failed };
+        }
+        if (set.length > 0)
+          tx.run(sql`UPDATE ${w.table} SET ${sql.join(set, sql`, `)} WHERE ${these}`);
+        const back = tx.get<{ n: number }>(sql`
+          SELECT count(*) AS n FROM ${this.from} WHERE ${these} AND ${this.inScope(sctx)}`);
+        if (Number(back?.n ?? 0) !== current.length) throw this.outOfScope(sctx);
+        if (report) {
+          const after = tx.all<TableRow>(
+            sql`SELECT ${this.columns()} FROM ${this.from} WHERE ${these}`,
+          );
+          report([...before, ...after.map((row) => this.serialize(row))]);
+        }
+        return { updated: current.length, failed };
+      }
+
+      const written: Row[] = [];
+      for (const prior of before) {
+        const id = prior.__meta.id;
+        const key = idParam(id, r.idType, sqliteDialect);
+        if (req.op === "delete") {
+          tx.run(sql`DELETE FROM ${w.table} WHERE ${w.id} = ${key}`);
+          await this.finish(tx, sctx, {
+            op: "delete",
+            id,
+            before: prior,
+            after: null,
+            patch: null,
+          });
+          continue;
+        }
+        if (set.length > 0) {
+          tx.run(sql`UPDATE ${w.table} SET ${sql.join(set, sql`, `)} WHERE ${w.id} = ${key}`);
+        }
+        const after = this.readBack(tx, id, sctx);
+        written.push(after);
+        await this.finish(tx, sctx, { op: "update", id, before: prior, after, patch: patch ?? {} });
+      }
+      report?.([...before, ...written]);
+      return { updated: current.length, failed };
+    });
+  }
+
+  /** Run `onMutate` (when given) on the change; answer the row the caller receives. */
+  private finish(
+    tx: SqliteExecutor,
+    sctx: SourceContext | undefined,
+    change: Omit<RowChange, "collection">,
+  ): Promise<Row> {
+    const full: RowChange = { ...change, collection: sctx?.collection ?? this.label };
+    const hook = this.onMutate;
+    if (!hook) return Promise.resolve((full.after ?? full.before) as Row);
+    return runOnMutate(hook, sctx, full, tx);
   }
 
   /**
@@ -720,14 +906,17 @@ export class SqliteTableSource implements Source {
       SELECT ${this.columns()}, (${this.inScope(sctx)}) AS __in_scope
       FROM ${this.from}
       WHERE ${this.resolver.id} = ${key}`);
-    if (!row?.__in_scope) {
-      const collection = sctx?.collection ?? this.label;
-      throw new UdcError("forbidden", `the row would fall outside the row scope of ${collection}`, {
-        collection,
-        reason: "out_of_scope",
-      });
-    }
+    if (!row?.__in_scope) throw this.outOfScope(sctx);
     return this.serialize(row);
+  }
+
+  /** The refusal of a write that would take a row out of the row scope (or the base `where`). */
+  private outOfScope(sctx: SourceContext | undefined): UdcError {
+    const collection = sctx?.collection ?? this.label;
+    return new UdcError("forbidden", `the row would fall outside the row scope of ${collection}`, {
+      collection,
+      reason: "out_of_scope",
+    });
   }
 
   addField(_req: SourceAddField, _sctx?: SourceContext): Promise<SchemaDoc> {

@@ -395,16 +395,16 @@ new PostgresTableSource({
 
 The SQLite counterpart of `postgres_table`: one table, typed columns, the same
 filter operators, sort, keyset and offset paging (the compiler's SQLite
-dialect), `read`, and `mutate` (insert, partial update, delete) with the row
-scope inside every statement. `SqliteTableSource` takes the options of
-`PostgresTableSourceOptions` that carry over — `schema`, `table`, `fields`
-(`column`, `sql`, `computed`, `readOnly`, `filterable`, `sortable`),
-`idColumn`, `idType`, `versionColumn`, `readOnly`, `where`, `totalCount`,
-`keepNulls`, `pageSizeDefault`, `defaultSort` — and a `db`. There is no
-`from` with joins (a computed field can still be a correlated subquery), no
-`onMutate`, no `mutate_many`, no search and no tree reparent: `capabilities`
-says so. `reindex` is there (`capabilities.reindex` when the source writes),
-so a kanban board over a SQLite table can always be reordered.
+dialect), `read`, `mutate` (insert, partial update, delete) and
+`mutate_many`, with the row scope inside every statement. `SqliteTableSource`
+takes the options of `PostgresTableSourceOptions` that carry over — `schema`,
+`table`, `fields` (`column`, `sql`, `computed`, `readOnly`, `filterable`,
+`sortable`), `idColumn`, `idType`, `versionColumn`, `readOnly`, `onMutate`,
+`where`, `totalCount`, `keepNulls`, `pageSizeDefault`, `defaultSort` — and a
+`db`. There is no `from` with joins (a computed field can still be a
+correlated subquery), no search and no tree reparent: `capabilities` says so.
+`reindex` is there (`capabilities.reindex` when the source writes), so a
+kanban board over a SQLite table can always be reordered.
 
 **One `SqliteDatabase` per file.** A SQLite handle is one connection: a
 statement the host ran on it while the source awaited inside a transaction
@@ -456,9 +456,16 @@ options:
   to the read connection and never wait for a writer (WAL). Nothing about rows
   is cached between requests.
 - `:memory:` has a single connection; reads then take their turn in the queue.
-- `better-sqlite3` and other drivers: implement `SqliteConnection` (`all`,
-  `values`, `run`, `exec`, `close`) and pass it to `new SqliteDatabase({ write,
-  read })`.
+- **`better-sqlite3`** instead of `node:sqlite`: `openBetterSqlite(path,
+  opts)` from `@jsudc/server/better-sqlite3` opens the file the same way (a
+  write and a read-only read connection, WAL, the same options, `setup` and
+  `unicodeLower` included) and returns the same `SqliteDatabase`.
+  `better-sqlite3` is an optional peer (`npm install better-sqlite3`): only
+  that entry loads it, on the first `openBetterSqlite`, and says so when it
+  is missing. `betterSqliteConnection(db)` adapts a `Database` you opened
+  yourself.
+- Other drivers: implement `SqliteConnection` (`all`, `values`, `run`,
+  `exec`, `close`) and pass it to `new SqliteDatabase({ write, read })`.
 
 **Storage.** Per field type, as `sqliteColumnResolver` expects: `integer` and
 `year` INTEGER, `decimal` NUMERIC, `bool` INTEGER 0/1, `date` TEXT
@@ -511,6 +518,52 @@ column should be INTEGER (or NUMERIC for a `decimal` order), so it sorts as
 a number. With a change feed, the notice names the renumbered rows (the
 source hands them to `changedRows`), so only the streams that see them hear
 of it.
+
+**`mutate_many`** (see [`mutate_many`](#mutate_many-many-rows-in-one-request))
+runs in one `BEGIN IMMEDIATE` transaction: the file's write lock is held from
+the first statement to `COMMIT`, so the rows read are the rows written. The
+patch is validated first (read-only and computed fields refused as in
+`mutate`, and the id column: `mutate_many` does not change ids); the target
+rows (the ids, or the filter minus `except_ids`, inside the base `where` and
+the row scope, at most `limit + 1`) are read in id order. Without `onMutate`
+one `UPDATE` / `DELETE` writes them all and bumps each version; with it, row
+by row, each read back in scope and handed to the hook. A row leaving the
+scope, or a hook failure, rolls the whole request back. The rows as they were
+and as they are go to `changedRows`, so the change feed names them.
+
+**`onMutate(ctx, change, tx)`** is the hook of the Postgres sources (see
+[`onMutate`](#onmutate-a-hosts-own-write)), typed `SqliteOnMutateHook`: the
+same `RowChange`, called after the source's statement and before `COMMIT` on
+every `mutate` and on every row of a `mutate_many`; a throw rolls everything
+back (a `UdcError` as it is, anything else `internal`); a returned row is the
+answer. `tx` is a `SqliteExecutor` on the write connection, inside the
+transaction (`tx.run`, `tx.get`, `tx.all`, synchronous); SQL the hook awaits
+through the same `SqliteDatabase` (`run`, `transaction` — a `SAVEPOINT` —, or
+Drizzle on its `proxy`) is in the transaction too. The drivers are
+synchronous but the hook may be async: the wrapper issues `BEGIN IMMEDIATE`
+and `COMMIT` itself and keeps its write queue held while the hook awaits.
+
+> **A slow hook holds every other writer of that file — in this process and
+> in others.** SQLite has one writer per file, and the hook runs while the
+> source holds it: every other write to the file (another request's
+> `mutate`, a host's own SQL, another process, the `sqlite3` shell) waits
+> until `COMMIT`, and is answered `busy` once it has waited
+> `busyTimeoutMs`. Reads do not wait on a file (WAL; they see the committed
+> rows, never the hook's uncommitted ones); on `:memory:` they take their
+> turn in the queue. Bound the hook's external call well under
+> `busyTimeoutMs`, and do slow work after the response.
+
+```ts
+import { type SqliteOnMutateHook, SqliteTableSource } from "@jsudc/server/sqlite";
+
+const audit: SqliteOnMutateHook<{ user: string }> = (ctx, change, tx) => {
+  tx.run({
+    sql: "INSERT INTO audit (user, op, row_id) VALUES (?, ?, ?)",
+    params: [ctx.user, change.op, change.id],
+  });
+};
+const notes = new SqliteTableSource({ db: vault, schema, table: "note", onMutate: audit });
+```
 
 ## The SQL compiler
 
@@ -845,7 +898,8 @@ upstream.
 Both Postgres sources take an option `onMutate(ctx, change, tx)`: a write of
 the host's own that goes with every mutation, such as a flag that must also
 reach an external system. `PostgresTableSource` and `PostgresJsonbSource`
-call it the same way.
+call it the same way; so does `sqlite_table`, with a SQLite `tx` (see
+[`sqlite_table`](#sqlite_table-a-table-of-a-sqlite-file)).
 
 - **`ctx`** is the request context (the plugin's `context`, see
   [Request context and scope](#request-context-and-scope)); `undefined`
@@ -973,8 +1027,9 @@ the plugin's `context`, the dispatcher's `rowScope` and `access`:
   `reason: "out_of_scope"`) and nothing is written.
 - Each changed row gets its version bumped. There is no `expected_version`.
 
-**One transaction** in both Postgres sources. The target rows are locked in
-id order; without `onMutate` a single `UPDATE` / `DELETE` writes them all.
+**One transaction** in both Postgres sources and in `sqlite_table`. The
+target rows are locked in id order (SQLite: the whole file, from the first
+statement); without `onMutate` a single `UPDATE` / `DELETE` writes them all.
 With `onMutate` they are written row by row inside the same transaction and
 the hook is called for each with its `before` / `after` (`patch` is the
 request's patch): **a hook failure rolls the whole request back** and is
@@ -1274,8 +1329,8 @@ never for a request that failed:
 | `reindex`       | `update` with the renumbered ids when the source hands the rows over (`sqlite_table`), else without ids, tested on the request's `scope` and the row scope's pinned values |
 | `tree.reparent` | `update` without ids (the subtree and both parents changed too), tested on the moved node                                                                                  |
 
-Both Postgres sources hand the rows a `mutate_many` wrote to the feed
-(`SourceContext.changedRows`); a source of your own with a native
+Both Postgres sources and `sqlite_table` hand the rows a `mutate_many` wrote
+to the feed (`SourceContext.changedRows`); a source of your own with a native
 `mutateMany` may do the same. One that does not still notifies, with the ids
 asked for and the row scope's pinned values.
 
@@ -1430,12 +1485,17 @@ From `@jsudc/server` (no database driver):
 | `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`             | the stream route on its own, and the scope rule's pieces                                                       |
 | `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                                           |
 | `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                                                     |
-| `SqliteTableSource`, `SqliteTableSourceOptions`, `SqliteTableFieldSpec`, `sqliteVersionTriggerSql`                                 | the SQLite table source and its version trigger (see [`sqlite_table`](#sqlite_table-a-table-of-a-sqlite-file)) |
+| `SqliteTableSource`, `SqliteTableSourceOptions`, `SqliteTableFieldSpec`, `SqliteOnMutateHook`, `sqliteVersionTriggerSql`           | the SQLite table source and its version trigger (see [`sqlite_table`](#sqlite_table-a-table-of-a-sqlite-file)) |
 | `SqliteDatabase`, `SqliteConnection`, `SqliteExecutor`, `isSqliteBusy`, `DEFAULT_SQLITE_BUSY_TIMEOUT_MS`                           | the one object per SQLite file, over a driver adapter                                                          |
 
 From `@jsudc/server/sqlite` (`node:sqlite`, built into Node 24): `openNodeSqlite`,
 `OpenNodeSqliteOptions` and `nodeSqliteConnection` — a file opened as one
 `SqliteDatabase` — and the SQLite exports of the root entry again.
+
+From `@jsudc/server/better-sqlite3` (needs the optional peer `better-sqlite3`):
+`openBetterSqlite`, `OpenBetterSqliteOptions`, `betterSqliteConnection`,
+`BetterSqliteDatabase` and `BetterSqliteStatement` — the same with
+`better-sqlite3` — and the SQLite exports of the root entry again.
 
 From `@jsudc/server/postgres` (needs `pg`):
 
@@ -1471,7 +1531,10 @@ that copies the rows into a table with real typed columns and serves it through
 `SqliteTableSource` (`test/sqlite-double/`, the rows copied into `node:sqlite`
 `:memory:`), and `sqlite-table` runs `test/sqlite-table/` — the SQLite source
 and wrapper on `:memory:` and on temp files — without any database server
-(`npm run test:sqlite`).
+(`npm run test:sqlite`). Its write suites (`mutate-many`, `mutate-many-hook`,
+`on-mutate`, `changes-writes`) run once per driver: `node:sqlite`, and
+`better-sqlite3` when it is installed and its native addon loads (a dev
+dependency here; the adapter's own suite is skipped otherwise).
 
 ```sh
 npm ci              # also builds dist (the prepare script)

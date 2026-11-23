@@ -155,6 +155,7 @@ export {
   sqliteQuery,
 } from "./sources/sqlite-sql.js";
 export {
+  type SqliteOnMutateHook,
   type SqliteTableFieldSpec,
   SqliteTableSource,
   type SqliteTableSourceOptions,

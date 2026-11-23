@@ -1,15 +1,45 @@
 // The SQLite suites: no database server. Each opens `:memory:` or a file in a temp
 // directory with `openNodeSqlite`, and builds its tables with plain SQL.
 import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FieldDef, SchemaDoc } from "@jsudc/core";
 import { afterAll } from "vitest";
+import { openBetterSqlite } from "../../src/better-sqlite3.js";
 import {
   type OpenNodeSqliteOptions,
   openNodeSqlite,
   type SqliteDatabase,
 } from "../../src/sqlite.js";
+
+/**
+ * Whether `better-sqlite3` (an optional peer) is installed here and its native
+ * addon loads: its suites run only then.
+ */
+export const betterSqliteAvailable: boolean = (() => {
+  try {
+    // Node's own require: no bundler resolution, and synchronous.
+    const Database = createRequire(import.meta.url)("better-sqlite3") as new (
+      path: string,
+    ) => { close(): void };
+    new Database(":memory:").close();
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+/** The adapter a suite opens its database with. */
+export type Driver = "node:sqlite" | "better-sqlite3";
+/** `node:sqlite`, and `better-sqlite3` when it is installed. */
+export const DRIVERS: Driver[] = betterSqliteAvailable
+  ? ["node:sqlite", "better-sqlite3"]
+  : ["node:sqlite"];
+/** Every place × every driver available, for `describe.each`. */
+export const SETUPS: { where: Where; driver: Driver }[] = DRIVERS.flatMap((driver) =>
+  (["memory", "file"] as const).map((where) => ({ where, driver })),
+);
 
 export { companiesSchema, companiesSeed, ids, rejectsWith } from "./shared.js";
 
@@ -42,6 +72,21 @@ afterAll(() => {
 /** A database, closed when the file is done. */
 export function openDb(where: Where, opts: OpenNodeSqliteOptions = {}): SqliteDatabase {
   const db = openNodeSqlite(where === "memory" ? ":memory:" : tempFile(), opts);
+  open.push(db);
+  return db;
+}
+
+/**
+ * A database at `path` (a temp file for `file`) opened with `driver`, closed
+ * when the file is done. `better-sqlite3` is loaded only when asked for.
+ */
+export async function openWith(
+  driver: Driver,
+  where: Where | string,
+  opts: Omit<OpenNodeSqliteOptions, "setup"> = {},
+): Promise<SqliteDatabase> {
+  const path = where === "memory" ? ":memory:" : where === "file" ? tempFile() : where;
+  const db = driver === "node:sqlite" ? openNodeSqlite(path, opts) : openBetterSqlite(path, opts);
   open.push(db);
   return db;
 }
