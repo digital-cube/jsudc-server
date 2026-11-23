@@ -66,6 +66,7 @@ export {
   CollectionRegistry,
   loadRegistry,
   readCollectionAssets,
+  viewDefaultSortProblems,
 } from "./registry.js";
 export { activeSchema, wireVersion, writeSchemaRevision } from "./schema-store.js";
 export {
