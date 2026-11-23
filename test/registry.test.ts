@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { SchemaDocSchema, ViewConfigSchema } from "@jsudc/core";
+import { SchemaDocSchema, type ViewConfig, ViewConfigSchema } from "@jsudc/core";
 import { describe, expect, it } from "vitest";
 import {
   CollectionRegistry,
@@ -138,7 +138,13 @@ describe("viewDefaultSortProblems", () => {
       "default_sort[0]: gone is not a field of the schema",
       "default_sort[2]: subject is named twice",
     ]);
-    expect(viewDefaultSortProblems(view("subject:desc"), schema)).toEqual([
+    // Core 0.6.0's ViewConfigSchema refuses it at parse; a view built without the parse is still checked.
+    expect(() => view("subject:desc")).toThrow();
+    const unparsed = {
+      ...ViewConfigSchema.parse({}),
+      default_sort: "subject:desc",
+    } as unknown as ViewConfig;
+    expect(viewDefaultSortProblems(unparsed, schema)).toEqual([
       "default_sort: a list of { field, dir: asc | desc }",
     ]);
   });
