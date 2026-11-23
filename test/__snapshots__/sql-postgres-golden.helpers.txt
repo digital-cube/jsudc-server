@@ -1,0 +1,12 @@
+idParam uuid
+  $1::uuid
+  ["00000000-0000-4000-8000-000000000001"]
+idParam integer
+  $1::bigint
+  ["42"]
+idParam text
+  $1::text
+  ["a'b"]
+codePointOrder
+  (x COLLATE "C")
+  []

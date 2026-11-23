@@ -1,0 +1,963 @@
+filter s eq
+  ((("c_s")::text COLLATE "C") = $1::text)
+  ["Alfa"]
+filter s eq ci
+  ((lower((("c_s")::text)) COLLATE "C") = lower($1::text))
+  ["Alfa"]
+filter s neq
+  ((("c_s")::text COLLATE "C") <> $1::text)
+  ["Alfa"]
+filter s neq ci
+  ((lower((("c_s")::text)) COLLATE "C") <> lower($1::text))
+  ["Alfa"]
+filter s gt
+  ((("c_s")::text COLLATE "C") > $1::text)
+  ["Alfa"]
+filter s gt ci
+  ((lower((("c_s")::text)) COLLATE "C") > lower($1::text))
+  ["Alfa"]
+filter s gte
+  ((("c_s")::text COLLATE "C") >= $1::text)
+  ["Alfa"]
+filter s gte ci
+  ((lower((("c_s")::text)) COLLATE "C") >= lower($1::text))
+  ["Alfa"]
+filter s lt
+  ((("c_s")::text COLLATE "C") < $1::text)
+  ["Alfa"]
+filter s lt ci
+  ((lower((("c_s")::text)) COLLATE "C") < lower($1::text))
+  ["Alfa"]
+filter s lte
+  ((("c_s")::text COLLATE "C") <= $1::text)
+  ["Alfa"]
+filter s lte ci
+  ((lower((("c_s")::text)) COLLATE "C") <= lower($1::text))
+  ["Alfa"]
+filter s between
+  ((("c_s")::text COLLATE "C") BETWEEN $1::text AND $2::text)
+  ["Alfa","beta"]
+filter s between ci
+  ((lower((("c_s")::text)) COLLATE "C") BETWEEN lower($1::text) AND lower($2::text))
+  ["Alfa","beta"]
+filter s in
+  ((("c_s")::text COLLATE "C") = ANY($1::text[]))
+  [["Alfa","beta"]]
+filter s in ci
+  ((lower((("c_s")::text)) COLLATE "C") = ANY($1::text[]))
+  [["alfa","beta"]]
+filter s not_in
+  (CASE WHEN (("c_s")::text COLLATE "C") IS NULL THEN NULL ELSE (("c_s")::text COLLATE "C") <> ALL($1::text[]) END)
+  [["Alfa","beta"]]
+filter s not_in ci
+  (CASE WHEN (lower((("c_s")::text)) COLLATE "C") IS NULL THEN NULL ELSE (lower((("c_s")::text)) COLLATE "C") <> ALL($1::text[]) END)
+  [["alfa","beta"]]
+filter s contains
+  ((("c_s")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter s contains ci
+  ((("c_s")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter s starts_with
+  ((("c_s")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter s starts_with ci
+  ((("c_s")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter s ends_with
+  ((("c_s")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter s ends_with ci
+  ((("c_s")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter s is_null
+  ((("c_s")::text) IS NULL)
+  []
+filter s is_null ci
+  ((("c_s")::text) IS NULL)
+  []
+filter s is_not_null
+  ((("c_s")::text) IS NOT NULL)
+  []
+filter s is_not_null ci
+  ((("c_s")::text) IS NOT NULL)
+  []
+filter t eq
+  ((("c_t")::text COLLATE "C") = $1::text)
+  ["dugačak"]
+filter t eq ci
+  ((lower((("c_t")::text)) COLLATE "C") = lower($1::text))
+  ["dugačak"]
+filter t neq
+  ((("c_t")::text COLLATE "C") <> $1::text)
+  ["dugačak"]
+filter t neq ci
+  ((lower((("c_t")::text)) COLLATE "C") <> lower($1::text))
+  ["dugačak"]
+filter t gt
+  ((("c_t")::text COLLATE "C") > $1::text)
+  ["dugačak"]
+filter t gt ci
+  ((lower((("c_t")::text)) COLLATE "C") > lower($1::text))
+  ["dugačak"]
+filter t gte
+  ((("c_t")::text COLLATE "C") >= $1::text)
+  ["dugačak"]
+filter t gte ci
+  ((lower((("c_t")::text)) COLLATE "C") >= lower($1::text))
+  ["dugačak"]
+filter t lt
+  ((("c_t")::text COLLATE "C") < $1::text)
+  ["dugačak"]
+filter t lt ci
+  ((lower((("c_t")::text)) COLLATE "C") < lower($1::text))
+  ["dugačak"]
+filter t lte
+  ((("c_t")::text COLLATE "C") <= $1::text)
+  ["dugačak"]
+filter t lte ci
+  ((lower((("c_t")::text)) COLLATE "C") <= lower($1::text))
+  ["dugačak"]
+filter t between
+  ((("c_t")::text COLLATE "C") BETWEEN $1::text AND $2::text)
+  ["dugačak","tekst"]
+filter t between ci
+  ((lower((("c_t")::text)) COLLATE "C") BETWEEN lower($1::text) AND lower($2::text))
+  ["dugačak","tekst"]
+filter t in
+  ((("c_t")::text COLLATE "C") = ANY($1::text[]))
+  [["dugačak","tekst"]]
+filter t in ci
+  ((lower((("c_t")::text)) COLLATE "C") = ANY($1::text[]))
+  [["dugačak","tekst"]]
+filter t not_in
+  (CASE WHEN (("c_t")::text COLLATE "C") IS NULL THEN NULL ELSE (("c_t")::text COLLATE "C") <> ALL($1::text[]) END)
+  [["dugačak","tekst"]]
+filter t not_in ci
+  (CASE WHEN (lower((("c_t")::text)) COLLATE "C") IS NULL THEN NULL ELSE (lower((("c_t")::text)) COLLATE "C") <> ALL($1::text[]) END)
+  [["dugačak","tekst"]]
+filter t contains
+  ((("c_t")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter t contains ci
+  ((("c_t")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter t starts_with
+  ((("c_t")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter t starts_with ci
+  ((("c_t")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter t ends_with
+  ((("c_t")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter t ends_with ci
+  ((("c_t")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter t is_null
+  ((("c_t")::text) IS NULL)
+  []
+filter t is_null ci
+  ((("c_t")::text) IS NULL)
+  []
+filter t is_not_null
+  ((("c_t")::text) IS NOT NULL)
+  []
+filter t is_not_null ci
+  ((("c_t")::text) IS NOT NULL)
+  []
+filter n eq
+  (("c_n") = $1::numeric)
+  [9]
+filter n eq ci
+  (("c_n") = $1::numeric)
+  [9]
+filter n neq
+  (("c_n") <> $1::numeric)
+  [9]
+filter n neq ci
+  (("c_n") <> $1::numeric)
+  [9]
+filter n gt
+  (("c_n") > $1::numeric)
+  [9]
+filter n gt ci
+  (("c_n") > $1::numeric)
+  [9]
+filter n gte
+  (("c_n") >= $1::numeric)
+  [9]
+filter n gte ci
+  (("c_n") >= $1::numeric)
+  [9]
+filter n lt
+  (("c_n") < $1::numeric)
+  [9]
+filter n lt ci
+  (("c_n") < $1::numeric)
+  [9]
+filter n lte
+  (("c_n") <= $1::numeric)
+  [9]
+filter n lte ci
+  (("c_n") <= $1::numeric)
+  [9]
+filter n between
+  (("c_n") BETWEEN $1::numeric AND $2::numeric)
+  [9,10]
+filter n between ci
+  (("c_n") BETWEEN $1::numeric AND $2::numeric)
+  [9,10]
+filter n in
+  (("c_n") = ANY($1::numeric[]))
+  [[9,10]]
+filter n in ci
+  (("c_n") = ANY($1::numeric[]))
+  [[9,10]]
+filter n not_in
+  (CASE WHEN ("c_n") IS NULL THEN NULL ELSE ("c_n") <> ALL($1::numeric[]) END)
+  [[9,10]]
+filter n not_in ci
+  (CASE WHEN ("c_n") IS NULL THEN NULL ELSE ("c_n") <> ALL($1::numeric[]) END)
+  [[9,10]]
+filter n contains
+  ((("c_n")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter n contains ci
+  ((("c_n")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter n starts_with
+  ((("c_n")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter n starts_with ci
+  ((("c_n")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter n ends_with
+  ((("c_n")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter n ends_with ci
+  ((("c_n")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter n is_null
+  ((("c_n")::text) IS NULL)
+  []
+filter n is_null ci
+  ((("c_n")::text) IS NULL)
+  []
+filter n is_not_null
+  ((("c_n")::text) IS NOT NULL)
+  []
+filter n is_not_null ci
+  ((("c_n")::text) IS NOT NULL)
+  []
+filter d eq
+  (("c_d") = $1::numeric)
+  [1.5]
+filter d eq ci
+  (("c_d") = $1::numeric)
+  [1.5]
+filter d neq
+  (("c_d") <> $1::numeric)
+  [1.5]
+filter d neq ci
+  (("c_d") <> $1::numeric)
+  [1.5]
+filter d gt
+  (("c_d") > $1::numeric)
+  [1.5]
+filter d gt ci
+  (("c_d") > $1::numeric)
+  [1.5]
+filter d gte
+  (("c_d") >= $1::numeric)
+  [1.5]
+filter d gte ci
+  (("c_d") >= $1::numeric)
+  [1.5]
+filter d lt
+  (("c_d") < $1::numeric)
+  [1.5]
+filter d lt ci
+  (("c_d") < $1::numeric)
+  [1.5]
+filter d lte
+  (("c_d") <= $1::numeric)
+  [1.5]
+filter d lte ci
+  (("c_d") <= $1::numeric)
+  [1.5]
+filter d between
+  (("c_d") BETWEEN $1::numeric AND $2::numeric)
+  [1.5,10.125]
+filter d between ci
+  (("c_d") BETWEEN $1::numeric AND $2::numeric)
+  [1.5,10.125]
+filter d in
+  (("c_d") = ANY($1::numeric[]))
+  [[1.5,10.125]]
+filter d in ci
+  (("c_d") = ANY($1::numeric[]))
+  [[1.5,10.125]]
+filter d not_in
+  (CASE WHEN ("c_d") IS NULL THEN NULL ELSE ("c_d") <> ALL($1::numeric[]) END)
+  [[1.5,10.125]]
+filter d not_in ci
+  (CASE WHEN ("c_d") IS NULL THEN NULL ELSE ("c_d") <> ALL($1::numeric[]) END)
+  [[1.5,10.125]]
+filter d contains
+  ((("c_d")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter d contains ci
+  ((("c_d")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter d starts_with
+  ((("c_d")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter d starts_with ci
+  ((("c_d")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter d ends_with
+  ((("c_d")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter d ends_with ci
+  ((("c_d")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter d is_null
+  ((("c_d")::text) IS NULL)
+  []
+filter d is_null ci
+  ((("c_d")::text) IS NULL)
+  []
+filter d is_not_null
+  ((("c_d")::text) IS NOT NULL)
+  []
+filter d is_not_null ci
+  ((("c_d")::text) IS NOT NULL)
+  []
+filter y eq
+  (("c_y") = $1::numeric)
+  [1999]
+filter y eq ci
+  (("c_y") = $1::numeric)
+  [1999]
+filter y neq
+  (("c_y") <> $1::numeric)
+  [1999]
+filter y neq ci
+  (("c_y") <> $1::numeric)
+  [1999]
+filter y gt
+  (("c_y") > $1::numeric)
+  [1999]
+filter y gt ci
+  (("c_y") > $1::numeric)
+  [1999]
+filter y gte
+  (("c_y") >= $1::numeric)
+  [1999]
+filter y gte ci
+  (("c_y") >= $1::numeric)
+  [1999]
+filter y lt
+  (("c_y") < $1::numeric)
+  [1999]
+filter y lt ci
+  (("c_y") < $1::numeric)
+  [1999]
+filter y lte
+  (("c_y") <= $1::numeric)
+  [1999]
+filter y lte ci
+  (("c_y") <= $1::numeric)
+  [1999]
+filter y between
+  (("c_y") BETWEEN $1::numeric AND $2::numeric)
+  [1999,2024]
+filter y between ci
+  (("c_y") BETWEEN $1::numeric AND $2::numeric)
+  [1999,2024]
+filter y in
+  (("c_y") = ANY($1::numeric[]))
+  [[1999,2024]]
+filter y in ci
+  (("c_y") = ANY($1::numeric[]))
+  [[1999,2024]]
+filter y not_in
+  (CASE WHEN ("c_y") IS NULL THEN NULL ELSE ("c_y") <> ALL($1::numeric[]) END)
+  [[1999,2024]]
+filter y not_in ci
+  (CASE WHEN ("c_y") IS NULL THEN NULL ELSE ("c_y") <> ALL($1::numeric[]) END)
+  [[1999,2024]]
+filter y contains
+  ((("c_y")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter y contains ci
+  ((("c_y")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter y starts_with
+  ((("c_y")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter y starts_with ci
+  ((("c_y")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter y ends_with
+  ((("c_y")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter y ends_with ci
+  ((("c_y")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter y is_null
+  ((("c_y")::text) IS NULL)
+  []
+filter y is_null ci
+  ((("c_y")::text) IS NULL)
+  []
+filter y is_not_null
+  ((("c_y")::text) IS NOT NULL)
+  []
+filter y is_not_null ci
+  ((("c_y")::text) IS NOT NULL)
+  []
+filter dt eq
+  (("c_dt") = $1::date)
+  ["2020-01-15"]
+filter dt eq ci
+  (("c_dt") = $1::date)
+  ["2020-01-15"]
+filter dt neq
+  (("c_dt") <> $1::date)
+  ["2020-01-15"]
+filter dt neq ci
+  (("c_dt") <> $1::date)
+  ["2020-01-15"]
+filter dt gt
+  (("c_dt") > $1::date)
+  ["2020-01-15"]
+filter dt gt ci
+  (("c_dt") > $1::date)
+  ["2020-01-15"]
+filter dt gte
+  (("c_dt") >= $1::date)
+  ["2020-01-15"]
+filter dt gte ci
+  (("c_dt") >= $1::date)
+  ["2020-01-15"]
+filter dt lt
+  (("c_dt") < $1::date)
+  ["2020-01-15"]
+filter dt lt ci
+  (("c_dt") < $1::date)
+  ["2020-01-15"]
+filter dt lte
+  (("c_dt") <= $1::date)
+  ["2020-01-15"]
+filter dt lte ci
+  (("c_dt") <= $1::date)
+  ["2020-01-15"]
+filter dt between
+  (("c_dt") BETWEEN $1::date AND $2::date)
+  ["2020-01-15","2021-06-01"]
+filter dt between ci
+  (("c_dt") BETWEEN $1::date AND $2::date)
+  ["2020-01-15","2021-06-01"]
+filter dt in
+  (("c_dt") = ANY($1::date[]))
+  [["2020-01-15","2021-06-01"]]
+filter dt in ci
+  (("c_dt") = ANY($1::date[]))
+  [["2020-01-15","2021-06-01"]]
+filter dt not_in
+  (CASE WHEN ("c_dt") IS NULL THEN NULL ELSE ("c_dt") <> ALL($1::date[]) END)
+  [["2020-01-15","2021-06-01"]]
+filter dt not_in ci
+  (CASE WHEN ("c_dt") IS NULL THEN NULL ELSE ("c_dt") <> ALL($1::date[]) END)
+  [["2020-01-15","2021-06-01"]]
+filter dt contains
+  ((("c_dt")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter dt contains ci
+  ((("c_dt")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter dt starts_with
+  ((("c_dt")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter dt starts_with ci
+  ((("c_dt")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter dt ends_with
+  ((("c_dt")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter dt ends_with ci
+  ((("c_dt")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter dt is_null
+  ((("c_dt")::text) IS NULL)
+  []
+filter dt is_null ci
+  ((("c_dt")::text) IS NULL)
+  []
+filter dt is_not_null
+  ((("c_dt")::text) IS NOT NULL)
+  []
+filter dt is_not_null ci
+  ((("c_dt")::text) IS NOT NULL)
+  []
+filter ts eq
+  (("c_ts") = $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts eq ci
+  (("c_ts") = $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts neq
+  (("c_ts") <> $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts neq ci
+  (("c_ts") <> $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts gt
+  (("c_ts") > $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts gt ci
+  (("c_ts") > $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts gte
+  (("c_ts") >= $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts gte ci
+  (("c_ts") >= $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts lt
+  (("c_ts") < $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts lt ci
+  (("c_ts") < $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts lte
+  (("c_ts") <= $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts lte ci
+  (("c_ts") <= $1::timestamptz)
+  ["2020-01-15T10:00:00Z"]
+filter ts between
+  (("c_ts") BETWEEN $1::timestamptz AND $2::timestamptz)
+  ["2020-01-15T10:00:00Z","2021-06-01T00:00:00+02:00"]
+filter ts between ci
+  (("c_ts") BETWEEN $1::timestamptz AND $2::timestamptz)
+  ["2020-01-15T10:00:00Z","2021-06-01T00:00:00+02:00"]
+filter ts in
+  (("c_ts") = ANY($1::timestamptz[]))
+  [["2020-01-15T10:00:00Z","2021-06-01T00:00:00+02:00"]]
+filter ts in ci
+  (("c_ts") = ANY($1::timestamptz[]))
+  [["2020-01-15T10:00:00Z","2021-06-01T00:00:00+02:00"]]
+filter ts not_in
+  (CASE WHEN ("c_ts") IS NULL THEN NULL ELSE ("c_ts") <> ALL($1::timestamptz[]) END)
+  [["2020-01-15T10:00:00Z","2021-06-01T00:00:00+02:00"]]
+filter ts not_in ci
+  (CASE WHEN ("c_ts") IS NULL THEN NULL ELSE ("c_ts") <> ALL($1::timestamptz[]) END)
+  [["2020-01-15T10:00:00Z","2021-06-01T00:00:00+02:00"]]
+filter ts contains
+  ((("c_ts")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter ts contains ci
+  ((("c_ts")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter ts starts_with
+  ((("c_ts")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter ts starts_with ci
+  ((("c_ts")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter ts ends_with
+  ((("c_ts")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter ts ends_with ci
+  ((("c_ts")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter ts is_null
+  ((("c_ts")::text) IS NULL)
+  []
+filter ts is_null ci
+  ((("c_ts")::text) IS NULL)
+  []
+filter ts is_not_null
+  ((("c_ts")::text) IS NOT NULL)
+  []
+filter ts is_not_null ci
+  ((("c_ts")::text) IS NOT NULL)
+  []
+filter b eq
+  (("c_b") = $1::boolean)
+  [false]
+filter b eq ci
+  (("c_b") = $1::boolean)
+  [false]
+filter b neq
+  (("c_b") <> $1::boolean)
+  [false]
+filter b neq ci
+  (("c_b") <> $1::boolean)
+  [false]
+filter b gt
+  (("c_b") > $1::boolean)
+  [false]
+filter b gt ci
+  (("c_b") > $1::boolean)
+  [false]
+filter b gte
+  (("c_b") >= $1::boolean)
+  [false]
+filter b gte ci
+  (("c_b") >= $1::boolean)
+  [false]
+filter b lt
+  (("c_b") < $1::boolean)
+  [false]
+filter b lt ci
+  (("c_b") < $1::boolean)
+  [false]
+filter b lte
+  (("c_b") <= $1::boolean)
+  [false]
+filter b lte ci
+  (("c_b") <= $1::boolean)
+  [false]
+filter b between
+  (("c_b") BETWEEN $1::boolean AND $2::boolean)
+  [false,true]
+filter b between ci
+  (("c_b") BETWEEN $1::boolean AND $2::boolean)
+  [false,true]
+filter b in
+  (("c_b") = ANY($1::boolean[]))
+  [[false,true]]
+filter b in ci
+  (("c_b") = ANY($1::boolean[]))
+  [[false,true]]
+filter b not_in
+  (CASE WHEN ("c_b") IS NULL THEN NULL ELSE ("c_b") <> ALL($1::boolean[]) END)
+  [[false,true]]
+filter b not_in ci
+  (CASE WHEN ("c_b") IS NULL THEN NULL ELSE ("c_b") <> ALL($1::boolean[]) END)
+  [[false,true]]
+filter b contains
+  ((("c_b")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter b contains ci
+  ((("c_b")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter b starts_with
+  ((("c_b")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter b starts_with ci
+  ((("c_b")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter b ends_with
+  ((("c_b")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter b ends_with ci
+  ((("c_b")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter b is_null
+  ((("c_b")::text) IS NULL)
+  []
+filter b is_null ci
+  ((("c_b")::text) IS NULL)
+  []
+filter b is_not_null
+  ((("c_b")::text) IS NOT NULL)
+  []
+filter b is_not_null ci
+  ((("c_b")::text) IS NOT NULL)
+  []
+filter j eq
+  ((("c_j")::text COLLATE "C") = $1::text)
+  ["x"]
+filter j eq ci
+  ((lower((("c_j")::text)) COLLATE "C") = lower($1::text))
+  ["x"]
+filter j neq
+  ((("c_j")::text COLLATE "C") <> $1::text)
+  ["x"]
+filter j neq ci
+  ((lower((("c_j")::text)) COLLATE "C") <> lower($1::text))
+  ["x"]
+filter j gt
+  ((("c_j")::text COLLATE "C") > $1::text)
+  ["x"]
+filter j gt ci
+  ((lower((("c_j")::text)) COLLATE "C") > lower($1::text))
+  ["x"]
+filter j gte
+  ((("c_j")::text COLLATE "C") >= $1::text)
+  ["x"]
+filter j gte ci
+  ((lower((("c_j")::text)) COLLATE "C") >= lower($1::text))
+  ["x"]
+filter j lt
+  ((("c_j")::text COLLATE "C") < $1::text)
+  ["x"]
+filter j lt ci
+  ((lower((("c_j")::text)) COLLATE "C") < lower($1::text))
+  ["x"]
+filter j lte
+  ((("c_j")::text COLLATE "C") <= $1::text)
+  ["x"]
+filter j lte ci
+  ((lower((("c_j")::text)) COLLATE "C") <= lower($1::text))
+  ["x"]
+filter j between
+  ((("c_j")::text COLLATE "C") BETWEEN $1::text AND $2::text)
+  ["x","y"]
+filter j between ci
+  ((lower((("c_j")::text)) COLLATE "C") BETWEEN lower($1::text) AND lower($2::text))
+  ["x","y"]
+filter j in
+  ((("c_j")::text COLLATE "C") = ANY($1::text[]))
+  [["x","y"]]
+filter j in ci
+  ((lower((("c_j")::text)) COLLATE "C") = ANY($1::text[]))
+  [["x","y"]]
+filter j not_in
+  (CASE WHEN (("c_j")::text COLLATE "C") IS NULL THEN NULL ELSE (("c_j")::text COLLATE "C") <> ALL($1::text[]) END)
+  [["x","y"]]
+filter j not_in ci
+  (CASE WHEN (lower((("c_j")::text)) COLLATE "C") IS NULL THEN NULL ELSE (lower((("c_j")::text)) COLLATE "C") <> ALL($1::text[]) END)
+  [["x","y"]]
+filter j contains
+  ((("c_j")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter j contains ci
+  ((("c_j")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b%"]
+filter j starts_with
+  ((("c_j")::text) LIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter j starts_with ci
+  ((("c_j")::text) ILIKE $1::text)
+  ["a\\%\\_\\\\b%"]
+filter j ends_with
+  ((("c_j")::text) LIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter j ends_with ci
+  ((("c_j")::text) ILIKE $1::text)
+  ["%a\\%\\_\\\\b"]
+filter j is_null
+  ((("c_j")::text) IS NULL)
+  []
+filter j is_null ci
+  ((("c_j")::text) IS NULL)
+  []
+filter j is_not_null
+  ((("c_j")::text) IS NOT NULL)
+  []
+filter j is_not_null ci
+  ((("c_j")::text) IS NOT NULL)
+  []
+filter tags in
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el = ANY($1::text[])) ELSE NULL END)
+  [["Ui","x"]]
+filter tags in ci
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE lower(e.el) = ANY($1::text[])) ELSE NULL END)
+  [["ui","x"]]
+filter tags not_in
+  (CASE WHEN ("c_tags") IS NOT NULL THEN NOT EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el = ANY($1::text[])) ELSE NULL END)
+  [["Ui","x"]]
+filter tags not_in ci
+  (CASE WHEN ("c_tags") IS NOT NULL THEN NOT EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE lower(e.el) = ANY($1::text[])) ELSE NULL END)
+  [["ui","x"]]
+filter tags contains
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el LIKE $1::text) ELSE NULL END)
+  ["%5\\%\\_%"]
+filter tags contains ci
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el ILIKE $1::text) ELSE NULL END)
+  ["%5\\%\\_%"]
+filter tags starts_with
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el LIKE $1::text) ELSE NULL END)
+  ["5\\%\\_%"]
+filter tags starts_with ci
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el ILIKE $1::text) ELSE NULL END)
+  ["5\\%\\_%"]
+filter tags ends_with
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el LIKE $1::text) ELSE NULL END)
+  ["%5\\%\\_"]
+filter tags ends_with ci
+  (CASE WHEN ("c_tags") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_tags")) AS u(v)) AS e WHERE e.el ILIKE $1::text) ELSE NULL END)
+  ["%5\\%\\_"]
+filter tags is_null
+  ((("c_tags")::text) IS NULL)
+  []
+filter tags is_null ci
+  ((("c_tags")::text) IS NULL)
+  []
+filter tags is_not_null
+  ((("c_tags")::text) IS NOT NULL)
+  []
+filter tags is_not_null ci
+  ((("c_tags")::text) IS NOT NULL)
+  []
+filter refs in
+  (CASE WHEN ("c_refs") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_refs")) AS u(v)) AS e WHERE e.el = ANY($1::text[])) ELSE NULL END)
+  [["Ui","x"]]
+filter refs in ci
+  (CASE WHEN ("c_refs") IS NOT NULL THEN EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_refs")) AS u(v)) AS e WHERE lower(e.el) = ANY($1::text[])) ELSE NULL END)
+  [["ui","x"]]
+filter refs not_in
+  (CASE WHEN ("c_refs") IS NOT NULL THEN NOT EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_refs")) AS u(v)) AS e WHERE e.el = ANY($1::text[])) ELSE NULL END)
+  [["Ui","x"]]
+filter refs not_in ci
+  (CASE WHEN ("c_refs") IS NOT NULL THEN NOT EXISTS (SELECT 1 FROM (SELECT u.v::text AS el FROM unnest(("c_refs")) AS u(v)) AS e WHERE lower(e.el) = ANY($1::text[])) ELSE NULL END)
+  [["ui","x"]]
+filter refs contains
+  refused: unsupported_op
+filter refs contains ci
+  refused: unsupported_op
+filter refs starts_with
+  refused: unsupported_op
+filter refs starts_with ci
+  refused: unsupported_op
+filter refs ends_with
+  refused: unsupported_op
+filter refs ends_with ci
+  refused: unsupported_op
+filter refs is_null
+  ((("c_refs")::text) IS NULL)
+  []
+filter refs is_null ci
+  ((("c_refs")::text) IS NULL)
+  []
+filter refs is_not_null
+  ((("c_refs")::text) IS NOT NULL)
+  []
+filter refs is_not_null ci
+  ((("c_refs")::text) IS NOT NULL)
+  []
+filter no filter
+  TRUE
+  []
+filter and []
+  TRUE
+  []
+filter or []
+  FALSE
+  []
+filter and/or/not
+  ((("c_n") > $1::numeric) AND (((("c_s")::text COLLATE "C") = $2::text) OR (NOT (("c_b") = $3::boolean))))
+  [0,"x",true]
+filter eq null
+  NULL::boolean
+  []
+filter between with a null
+  NULL::boolean
+  []
+filter contains null
+  NULL::boolean
+  []
+filter array contains null
+  NULL::boolean
+  []
+filter in []
+  (("c_n") = ANY($1::numeric[]))
+  [[]]
+filter not_in []
+  (CASE WHEN (("c_s")::text COLLATE "C") IS NULL THEN NULL ELSE (("c_s")::text COLLATE "C") <> ALL($1::text[]) END)
+  [[]]
+filter id eq
+  ((pk::text) = $1::text)
+  ["7"]
+filter id neq
+  ((pk::text) <> $1::text)
+  ["7"]
+filter id eq null
+  NULL::boolean
+  []
+filter id in
+  ((pk::text) = ANY($1::text[]))
+  [["1","2"]]
+filter id not_in
+  ((pk::text) <> ALL($1::text[]))
+  [["1"]]
+filter id is_null
+  ((pk::text) IS NULL)
+  []
+filter id is_not_null
+  ((pk::text) IS NOT NULL)
+  []
+order by none
+  pk ASC
+  []
+cursor none []
+  (((pk > $1::bigint)))
+  ["42"]
+order by s
+  (("c_s")::text COLLATE "C") ASC NULLS LAST, pk ASC
+  []
+sort keys s
+  ((("c_s")::text COLLATE "C"))::text AS "__k0"
+  []
+cursor s ["v0"]
+  ((((("c_s")::text COLLATE "C"), pk) > ($1::text, $2::bigint)) OR (((("c_s")::text COLLATE "C") IS NULL)))
+  ["v0","42"]
+cursor s [null]
+  ((((("c_s")::text COLLATE "C") IS NULL) AND (pk > $1::bigint)))
+  ["42"]
+order by n desc
+  ("c_n") DESC NULLS LAST, pk ASC
+  []
+sort keys n desc
+  (("c_n"))::text AS "__k0"
+  []
+cursor n desc ["v0"]
+  (((("c_n"), $1::bigint) < ($2::numeric, pk)) OR ((("c_n") IS NULL)))
+  ["42","v0"]
+cursor n desc [null]
+  (((("c_n") IS NULL) AND (pk > $1::bigint)))
+  ["42"]
+order by dt, ts, b asc
+  ("c_dt") ASC NULLS LAST, ("c_ts") ASC NULLS LAST, ("c_b") ASC NULLS LAST, pk ASC
+  []
+sort keys dt, ts, b asc
+  (("c_dt"))::text AS "__k0", (("c_ts"))::text AS "__k1", (("c_b"))::text AS "__k2"
+  []
+cursor dt, ts, b asc ["v0","v1","v2"]
+  (((("c_dt"), ("c_ts"), ("c_b"), pk) > ($1::date, $2::timestamptz, $3::boolean, $4::bigint)) OR ((("c_dt") IS NULL)) OR ((("c_dt") = $5::date) AND (("c_ts") IS NULL)) OR ((("c_dt") = $6::date) AND (("c_ts") = $7::timestamptz) AND (("c_b") IS NULL)))
+  ["v0","v1","v2","42","v0","v0","v1"]
+cursor dt, ts, b asc [null,"v1","v2"]
+  (((("c_dt") IS NULL) AND (("c_ts") > $1::timestamptz OR ("c_ts") IS NULL)) OR ((("c_dt") IS NULL) AND (("c_ts") = $2::timestamptz) AND (("c_b") > $3::boolean OR ("c_b") IS NULL)) OR ((("c_dt") IS NULL) AND (("c_ts") = $4::timestamptz) AND (("c_b") = $5::boolean) AND (pk > $6::bigint)))
+  ["v1","v1","v2","v1","v2","42"]
+cursor dt, ts, b asc ["v0",null,"v2"]
+  (((("c_dt") > $1::date OR ("c_dt") IS NULL)) OR ((("c_dt") = $2::date) AND (("c_ts") IS NULL) AND (("c_b") > $3::boolean OR ("c_b") IS NULL)) OR ((("c_dt") = $4::date) AND (("c_ts") IS NULL) AND (("c_b") = $5::boolean) AND (pk > $6::bigint)))
+  ["v0","v0","v2","v0","v2","42"]
+cursor dt, ts, b asc ["v0","v1",null]
+  (((("c_dt") > $1::date OR ("c_dt") IS NULL)) OR ((("c_dt") = $2::date) AND (("c_ts") > $3::timestamptz OR ("c_ts") IS NULL)) OR ((("c_dt") = $4::date) AND (("c_ts") = $5::timestamptz) AND (("c_b") IS NULL) AND (pk > $6::bigint)))
+  ["v0","v0","v1","v0","v1","42"]
+order by d desc, y desc
+  ("c_d") DESC NULLS LAST, ("c_y") DESC NULLS LAST, pk ASC
+  []
+sort keys d desc, y desc
+  (("c_d"))::text AS "__k0", (("c_y"))::text AS "__k1"
+  []
+cursor d desc, y desc ["v0","v1"]
+  (((("c_d"), ("c_y"), $1::bigint) < ($2::numeric, $3::numeric, pk)) OR ((("c_d") IS NULL)) OR ((("c_d") = $4::numeric) AND (("c_y") IS NULL)))
+  ["42","v0","v1","v0"]
+cursor d desc, y desc [null,"v1"]
+  (((("c_d") IS NULL) AND (("c_y") < $1::numeric OR ("c_y") IS NULL)) OR ((("c_d") IS NULL) AND (("c_y") = $2::numeric) AND (pk > $3::bigint)))
+  ["v1","v1","42"]
+cursor d desc, y desc ["v0",null]
+  (((("c_d") < $1::numeric OR ("c_d") IS NULL)) OR ((("c_d") = $2::numeric) AND (("c_y") IS NULL) AND (pk > $3::bigint)))
+  ["v0","v0","42"]
+order by s asc, n desc (mixed)
+  (("c_s")::text COLLATE "C") ASC NULLS LAST, ("c_n") DESC NULLS LAST, pk ASC
+  []
+sort keys s asc, n desc (mixed)
+  ((("c_s")::text COLLATE "C"))::text AS "__k0", (("c_n"))::text AS "__k1"
+  []
+cursor s asc, n desc (mixed) ["v0","v1"]
+  ((((("c_s")::text COLLATE "C") > $1::text OR (("c_s")::text COLLATE "C") IS NULL)) OR (((("c_s")::text COLLATE "C") = $2::text) AND (("c_n") < $3::numeric OR ("c_n") IS NULL)) OR (((("c_s")::text COLLATE "C") = $4::text) AND (("c_n") = $5::numeric) AND (pk > $6::bigint)))
+  ["v0","v0","v1","v0","v1","42"]
+cursor s asc, n desc (mixed) [null,"v1"]
+  ((((("c_s")::text COLLATE "C") IS NULL) AND (("c_n") < $1::numeric OR ("c_n") IS NULL)) OR (((("c_s")::text COLLATE "C") IS NULL) AND (("c_n") = $2::numeric) AND (pk > $3::bigint)))
+  ["v1","v1","42"]
+cursor s asc, n desc (mixed) ["v0",null]
+  ((((("c_s")::text COLLATE "C") > $1::text OR (("c_s")::text COLLATE "C") IS NULL)) OR (((("c_s")::text COLLATE "C") = $2::text) AND (("c_n") IS NULL) AND (pk > $3::bigint)))
+  ["v0","v0","42"]
