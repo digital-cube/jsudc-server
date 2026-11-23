@@ -2,43 +2,29 @@
  * The SQLite double of `src/sources/postgres-jsonb.js`: the Vitest project
  * `sqlite` aliases that module to this one, so the jsonb read suites
  * (pg-filter, pg-paging, pg-parity, pg-array, pg-allowlist) run unchanged
- * against the SQL compiler's SQLite dialect, in a `node:sqlite` `:memory:`
- * database.
+ * against `SqliteTableSource` (the SQL compiler's SQLite dialect), over a
+ * `node:sqlite` `:memory:` `SqliteDatabase`.
  *
  * The suites keep writing their rows into the Postgres jsonb table. Before
  * every `list` this double copies those rows into a SQLite table with one
  * typed column per live field, in the storage `sqliteColumnResolver` expects
  * (INTEGER, NUMERIC, 0/1, `YYYY-MM-DD`, UTC datetime text, JSON text), and
- * answers the `list` with SQL compiled by `compileFilter` / `compileSort` /
- * `orderBy` / `cursorPredicate` / `sortKeyColumns` through that resolver and
- * rendered by `sqliteQuery`: the paging the `postgres_table` source does,
- * minus search and writes (the SQLite source is the next ticket).
+ * answers the `list` with `SqliteTableSource` over that table (filter, sort,
+ * keyset and offset paging, the row scope in its SQL).
  *
  * The connection registers a Unicode `lower()` (`String#toLowerCase`), as the
  * dialect's notes tell a host to: SQLite's own folds ASCII only.
  */
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import type { FieldDef, ListResponse, Row, SchemaDoc } from "@jsudc/core";
-import { type SQL, sql } from "drizzle-orm";
+import type { FieldDef, ListResponse, SchemaDoc } from "@jsudc/core";
+import { sql } from "drizzle-orm";
 import { afterAll } from "vitest";
 import { connect, type Db } from "../../src/db/client.js";
-import { andFilters } from "../../src/scope.js";
-import { type CursorValue, decodeCursor, encodeCursor } from "../../src/sources/cursor.js";
 import { assertQueryFields } from "../../src/sources/fields.js";
-import {
-  DEFAULT_PAGE_SIZE,
-  type SourceContext,
-  type SourceListRequest,
-} from "../../src/sources/source.js";
-import {
-  compileFilter,
-  compileSort,
-  cursorPredicate,
-  type FieldResolver,
-  orderBy,
-  sortKeyColumns,
-} from "../../src/sources/sql.js";
-import { sqliteColumnResolver, sqliteDateTime, sqliteQuery } from "../../src/sources/sqlite-sql.js";
+import type { SourceContext, SourceListRequest } from "../../src/sources/source.js";
+import { sqliteDateTime } from "../../src/sources/sqlite-sql.js";
+import { SqliteTableSource } from "../../src/sources/sqlite-table.js";
+import type { SqliteDatabase } from "../../src/sqlite-database.js";
+import { openNodeSqlite } from "../../src/sqlite-node.js";
 
 // Not imported from ./helpers.js: helpers imports this module (through the alias).
 const TEST_DATABASE_URL =
@@ -86,7 +72,7 @@ const COLUMN_TYPE: Record<Kind, string> = {
 };
 
 /** A jsonb value as the SQLite column stores it (SQL NULL for a missing one). */
-function store(kind: Kind, def: FieldDef, v: unknown): SQLInputValue {
+function store(kind: Kind, def: FieldDef, v: unknown): unknown {
   if (v === null || v === undefined) return null;
   switch (kind) {
     case "integer":
@@ -104,47 +90,39 @@ function store(kind: Kind, def: FieldDef, v: unknown): SQLInputValue {
   }
 }
 
-/** A SQLite column value back into the row a client gets. */
-function load(kind: Kind, v: unknown): unknown {
-  if (v === null || v === undefined) return undefined;
-  if (kind === "bool") return v === 1;
-  if (kind === "json") return JSON.parse(String(v));
-  return v;
-}
-
 export class PostgresJsonbSource {
   readonly kind = "sqlite_double";
   readonly enforcesRowScope = true;
   private readonly origin: string;
   private readonly schema: SchemaDoc;
-  private readonly pageSizeDefault: number;
-  private readonly db = new DatabaseSync(":memory:");
+  private readonly db: SqliteDatabase;
   private readonly live: { field: string; kind: Kind; def: FieldDef }[];
-  private readonly resolver: FieldResolver;
+  private readonly source: SqliteTableSource;
+  private readonly created: Promise<void>;
   private copied: string | null = null;
 
   constructor(opts: PostgresJsonbSourceOptions) {
     this.origin = opts.table;
     this.schema = opts.initialSchema;
-    this.pageSizeDefault = opts.pageSizeDefault ?? DEFAULT_PAGE_SIZE;
     this.live = this.schema.field_order
       .filter((f) => this.schema.fields[f] && !this.schema.fields[f]?.deleted)
       .map((field) => {
         const def = this.schema.fields[field] as FieldDef;
         return { field, kind: kindOf(def), def };
       });
-    this.resolver = sqliteColumnResolver({
-      fields: Object.fromEntries(
-        this.live.map(({ field }) => [field, sql`${sql.identifier(field)}`]),
-      ),
-      id: sql`"id"`,
-      idType: "uuid",
-    });
-    this.db.function("lower", { deterministic: true }, (s) =>
-      s === null ? null : String(s).toLowerCase(),
-    );
+    this.db = openNodeSqlite(":memory:", { unicodeLower: true });
+    afterAll(() => this.db.close());
     const cols = this.live.map(({ field, kind }) => `, "${field}" ${COLUMN_TYPE[kind]}`).join("");
-    this.db.exec(`CREATE TABLE t ("id" TEXT PRIMARY KEY, "version" INTEGER NOT NULL${cols})`);
+    this.created = this.db.exec(
+      `CREATE TABLE t ("id" TEXT PRIMARY KEY, "version" INTEGER NOT NULL${cols})`,
+    );
+    this.source = new SqliteTableSource({
+      db: this.db,
+      schema: this.schema,
+      table: "t",
+      versionColumn: "version",
+      pageSizeDefault: opts.pageSizeDefault,
+    });
   }
 
   async describe(): Promise<SchemaDoc> {
@@ -152,54 +130,15 @@ export class PostgresJsonbSource {
   }
 
   async list(req: SourceListRequest, sctx?: SourceContext): Promise<ListResponse> {
+    // Refused before the copy reads the jsonb table (pg-allowlist watches for that).
     assertQueryFields(this.schema, req.filter, req.sort);
     await this.sync();
-    const r = this.resolver;
-    const where = compileFilter(andFilters(sctx?.rowScope, req.filter), this.schema, r);
-    const terms = compileSort(req.sort, this.schema, r);
-    const limit = req.page?.limit ?? this.pageSizeDefault;
-    const cursor = req.page?.cursor;
-    const offset = req.page?.offset ?? 0;
-    const after = cursor != null ? decodeCursor(cursor, terms.length, r.idType) : null;
-    const pageWhere = after
-      ? sql`${where} AND ${cursorPredicate(terms, after.values, after.id, r)}`
-      : where;
-    const keyCols = terms.length > 0 ? sql`, ${sortKeyColumns(terms, r)}` : sql``;
-    const rows = this.all(sql`
-      SELECT *${keyCols} FROM t
-      WHERE ${pageWhere}
-      ORDER BY ${orderBy(terms, r)}
-      LIMIT ${limit + 1} OFFSET ${after ? 0 : offset}`);
-    const total = Number(this.all(sql`SELECT count(*) AS total FROM t WHERE ${where}`)[0]?.total);
-
-    const page = rows.slice(0, limit);
-    const last = page.at(-1);
-    const next_cursor =
-      rows.length > limit && last
-        ? encodeCursor([
-            ...terms.map((_, i) => (last[`__k${i}`] ?? null) as CursorValue),
-            String(last.id),
-          ])
-        : null;
-    return { rows: page.map((row) => this.serialize(row)), next_cursor, total };
-  }
-
-  private all(query: SQL): Record<string, unknown>[] {
-    const q = sqliteQuery(query);
-    return this.db.prepare(q.sql).all(...(q.params as SQLInputValue[]));
-  }
-
-  private serialize(row: Record<string, unknown>): Row {
-    const out: Row = { __meta: { id: String(row.id), version: Number(row.version) } };
-    for (const { field, kind } of this.live) {
-      const v = load(kind, row[field]);
-      if (v !== undefined) out[field] = v;
-    }
-    return out;
+    return this.source.list(req, sctx);
   }
 
   /** Copy the jsonb rows into the SQLite table when they changed since the last copy. */
   private async sync(): Promise<void> {
+    await this.created;
     const res = await own.db.execute<{
       id: string;
       version: number;
@@ -207,17 +146,22 @@ export class PostgresJsonbSource {
     }>(sql`SELECT id::text AS id, version, data FROM ${sql.identifier(this.origin)} ORDER BY id`);
     const fingerprint = JSON.stringify(res.rows);
     if (fingerprint === this.copied) return;
-    this.db.exec("DELETE FROM t");
     const names = this.live.map(({ field }) => `, "${field}"`).join("");
     const marks = this.live.map(() => ", ?").join("");
-    const insert = this.db.prepare(`INSERT INTO t ("id", "version"${names}) VALUES (?, ?${marks})`);
-    for (const row of res.rows) {
-      insert.run(
-        row.id,
-        row.version,
-        ...this.live.map(({ field, kind, def }) => store(kind, def, row.data[field])),
-      );
-    }
+    const insert = `INSERT INTO t ("id", "version"${names}) VALUES (?, ?${marks})`;
+    await this.db.transaction((tx) => {
+      tx.run("DELETE FROM t");
+      for (const row of res.rows) {
+        tx.run({
+          sql: insert,
+          params: [
+            row.id,
+            row.version,
+            ...this.live.map(({ field, kind, def }) => store(kind, def, row.data[field])),
+          ],
+        });
+      }
+    });
     this.copied = fingerprint;
   }
 }

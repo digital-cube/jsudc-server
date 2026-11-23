@@ -9,11 +9,22 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [0.7.0] - 2026-11-23
 
-`@jsudc/server` imports without `pg`: everything that needs `pg` or a Postgres
-database moves to a second entry, `@jsudc/server/postgres`, and `pg` becomes an
-optional peer. A host that serves only `memory`, `filesystem`, `http_api` and
-`yaml_menu` collections (or a SQLite source of its own) installs no driver.
-Breaking: a Postgres host changes its imports, nothing else.
+Three pieces of work, released together with `@jsudc/core` 0.7.0 and
+`@jsudc/react` 0.7.0; needs `@jsudc/core` 0.7.0 (the `sqlite_table` kind and
+the `busy` error code):
+
+1. `@jsudc/server` imports without `pg`: everything that needs `pg` or a
+   Postgres database moves to a second entry, `@jsudc/server/postgres`, and
+   `pg` becomes an optional peer. A host that serves only `memory`,
+   `filesystem`, `http_api`, `yaml_menu` or `sqlite_table` collections installs
+   no Postgres driver.
+2. A dialect in the SQL compiler: the same filter, sort and keyset cursor
+   compiled for Postgres or SQLite.
+3. `sqlite_table`, a SQLite table as a collection (read, write, row scope,
+   `reindex`), over one shared `SqliteDatabase` per file, with `node:sqlite`
+   from `@jsudc/server/sqlite`.
+
+Breaking: a Postgres host changes its imports (below), nothing else.
 
 ### Migration
 
@@ -36,10 +47,13 @@ line each; the names, signatures and behaviour are unchanged):
 - `makeSource` when a collection is `postgres_jsonb` or `postgres_table`, or
   when you pass `db`: the subpath's `makeSource` makes every kind and takes
   `PostgresSourceDeps` (`SourceDeps` plus `db`). The root entry's `makeSource`
-  makes the other four kinds; `SourceDeps` no longer has `db`.
+  makes the other kinds (`memory`, `filesystem`, `http_api`, `yaml_menu` and
+  `sqlite_table`); `SourceDeps` no longer has `db`.
 
 ### Changed
 
+- The `@jsudc/core` peer range is `^0.7.0` (`sqlite_table`, `busy`); `^0.6.0`
+  does not accept 0.7.0.
 - New subpath export `@jsudc/server/postgres` (`dist/postgres.js`). The root
   entry imports neither `pg` nor `drizzle-orm/node-postgres`, at runtime or in
   its `.d.ts`, directly or through another module.
@@ -77,6 +91,46 @@ line each; the names, signatures and behaviour are unchanged):
   loads a `memory` collection and `buildApp({ swagger: false })` answers
   `describe` and `list`; importing `@jsudc/server/postgres` there fails on
   the missing `pg` only.
+- `sqlite_table`: `SqliteTableSource`, one table of a SQLite file with typed
+  columns — filter, sort, keyset and offset paging, `read`, and `mutate` with
+  the row scope in the `WHERE` of every statement (`enforcesRowScope`), its
+  `eq` pins written over an insert or a patch, the written row read back in
+  scope and the transaction rolled back when it left it. The options of
+  `PostgresTableSourceOptions` that carry over (no `from` with joins, no
+  `onMutate`, no search); `capabilities.mutate_many` and `search` are off.
+  Values are served in the protocol's JSON types without `to_jsonb`. A `uuid`
+  id is lower-case TEXT, assigned with `crypto.randomUUID()` on insert.
+- `sqlite_table` `reindex` (`capabilities.reindex: true` when the source
+  writes): the scope's rows renumbered to `gap`, `2*gap`, … in their current
+  order (NULLs last, ties by id), each version bumped, in one `BEGIN
+  IMMEDIATE` transaction and one `UPDATE … FROM` with the base `where` and
+  the row scope ANDed in. The order field and the scope fields must be
+  writable columns (`validation_error` otherwise). A kanban board over a
+  SQLite table no longer fails a drop whose neighbours leave no room.
+- `reindex` hands `SourceContext.changedRows` to the source as `mutate_many`
+  does: a source that reports the rows it renumbered (`sqlite_table`) gets a
+  change notice with their ids; the others keep the notice without ids.
+- `SqliteDatabase`, the one object per SQLite file a host shares with the
+  sources: one write connection behind an in-process queue, one read
+  connection, WAL, `BEGIN IMMEDIATE` for every write transaction, the write
+  lock waited for asynchronously up to `busyTimeoutMs` and then answered with
+  the protocol error `busy`. Code running inside a transaction joins it
+  (nested ones are savepoints); `proxy` is the callback of
+  `drizzle-orm/sqlite-proxy`. No driver is imported: a `SqliteConnection`
+  adapts one.
+- `@jsudc/server/sqlite`: `openNodeSqlite(path, opts)` and
+  `nodeSqliteConnection(db)`, the `node:sqlite` adapter (Node 24, no native
+  addon), with the wrapper and the source re-exported. The root entry stays
+  driver-free.
+- `sqliteVersionTriggerSql({ table, versionColumn })`: the `AFTER UPDATE`
+  trigger that bumps the version for writers that do not, never twice for
+  the source.
+- `makeSource` (root entry) makes a `sqlite_table` collection from
+  `source.yaml` over `SourceDeps.sqlite[options.database]`.
+- `npm run test:sqlite`: the SQLite suites, no database server needed. The
+  `sqlite` Vitest project now runs the jsonb read suites through
+  `SqliteTableSource`. `test:no-pg` also serves a `sqlite_table` collection
+  from the packed tarball (`NO_PG_CORE_DIR` installs a local core).
 
 ## [0.6.0] - 2026-11-23
 

@@ -505,23 +505,40 @@ export class ScopedCollection {
 
   /**
    * A `reindex` under the row scope. With a change feed, a renumbering that
-   * touched rows is notified without ids, for the values every renumbered row
-   * holds: the request's `scope` and the row scope's pinned fields.
+   * touched rows is notified with the rows the source handed over
+   * (`changedRows`, sqlite_table), else without ids, for the values every
+   * renumbered row holds: the request's `scope` and the row scope's pinned
+   * fields.
    */
   async reindex(req: SourceReindex): Promise<number> {
-    const updated = await this.reindexInScope(req);
-    if (this.feed && updated > 0) {
-      await this.feed.written(this.collection.name, "update", [], {
-        ids: false,
-        match: [{ values: { ...rowScopePins(this.rowScope), ...req.scope } }],
-      });
+    const feed = this.feed;
+    // A source that can (sqlite_table) hands over the rows it renumbered, before and after.
+    let seen: Row[] | undefined;
+    const sctx: SourceContext = feed
+      ? {
+          ...this.sctx,
+          changedRows: (rows) => {
+            seen ??= [];
+            seen.push(...rows);
+          },
+        }
+      : this.sctx;
+    const updated = await this.reindexInScope(req, sctx);
+    if (feed && updated > 0) {
+      if (seen) await feed.written(this.collection.name, "update", seen);
+      else {
+        await feed.written(this.collection.name, "update", [], {
+          ids: false,
+          match: [{ values: { ...rowScopePins(this.rowScope), ...req.scope } }],
+        });
+      }
     }
     return updated;
   }
 
-  private async reindexInScope(req: SourceReindex): Promise<number> {
+  private async reindexInScope(req: SourceReindex, sctx: SourceContext): Promise<number> {
     const source = this.source as Source & Required<Pick<Source, "reindex">>;
-    if (!this.rowScope) return source.reindex(req, this.sctx);
+    if (!this.rowScope) return source.reindex(req, sctx);
     for (const field of Object.keys(req.scope)) {
       if (this.hidden.has(field)) throw unknownField(field, "reindex scope");
     }
@@ -540,7 +557,7 @@ export class ScopedCollection {
       if (Object.hasOwn(scope, field) && scope[field] !== value) return 0;
       scope[field] = value;
     }
-    return source.reindex({ ...req, scope }, this.sctx);
+    return source.reindex({ ...req, scope }, sctx);
   }
 
   /**

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 // Inside the jsudc monorepo, test against @jsudc/core's source so a change there needs no
 // rebuild; standalone, the installed package is used.
@@ -68,7 +68,7 @@ export default defineConfig({
     coverage: {
       include: ["src/**/*.ts"],
       // Re-exports only.
-      exclude: ["src/index.ts", "src/postgres.ts"],
+      exclude: ["src/index.ts", "src/postgres.ts", "src/sqlite.ts"],
       thresholds: { lines: 80, statements: 80, functions: 80, branches: 80 },
     },
     projects: [
@@ -77,6 +77,7 @@ export default defineConfig({
         test: {
           name: "udc-server",
           include: ["test/**/*.test.ts"],
+          exclude: [...configDefaults.exclude, "test/sqlite-table/**"],
           sequence: { groupOrder: 0 },
         },
       },
@@ -108,6 +109,18 @@ export default defineConfig({
           name: "sqlite",
           include: SQLITE_SUITES,
           sequence: { groupOrder: 3 },
+        },
+      },
+      {
+        // The `sqlite_table` source and the SQLite wrapper, on `:memory:` and temp files: no
+        // database server, so not `extends: true` (the root's globalSetup creates the
+        // Postgres test database). `npm run test:sqlite` runs this project alone.
+        resolve: { alias: existsSync(coreSrc) ? { "@jsudc/core": coreSrc } : {} },
+        test: {
+          name: "sqlite-table",
+          root: fileURLToPath(new URL(".", import.meta.url)),
+          include: ["test/sqlite-table/**/*.test.ts"],
+          sequence: { groupOrder: 4 },
         },
       },
     ],

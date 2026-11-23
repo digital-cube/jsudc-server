@@ -3,7 +3,7 @@
   "version": "0.7.0",
   "private": false,
   "type": "module",
-  "description": "A UDC server in TypeScript: the dispatcher, the collection registry, sources (memory, filesystem, HTTP API, YAML menu; Postgres jsonb and table from @jsudc/server/postgres), schema revisions and edits, seeding, and a Fastify plugin.",
+  "description": "A UDC server in TypeScript: the dispatcher, the collection registry, sources (memory, filesystem, HTTP API, YAML menu, a SQLite table; Postgres jsonb and table from @jsudc/server/postgres, node:sqlite from @jsudc/server/sqlite), schema revisions and edits, seeding, and a Fastify plugin.",
   "keywords": [
     "udc",
     "jsudc",
@@ -14,6 +14,7 @@
     "fastify-plugin",
     "postgres",
     "jsonb",
+    "sqlite",
     "drizzle"
   ],
   "license": "MIT",
@@ -41,6 +42,10 @@
       "types": "./dist/postgres.d.ts",
       "default": "./dist/postgres.js"
     },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "default": "./dist/sqlite.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -60,6 +65,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
+    "test:sqlite": "vitest run --project sqlite-table",
     "test:no-pg": "node test/no-pg/run.mjs"
   },
   "dependencies": {
@@ -68,7 +74,7 @@
   "peerDependencies": {
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^6.1.2",
-    "@jsudc/core": "^0.6.0",
+    "@jsudc/core": "^0.7.0",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.7",
     "fastify-type-provider-zod": "^7.0.0",
@@ -93,7 +99,7 @@
     "@biomejs/biome": "^2.5.15",
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^6.1.2",
-    "@jsudc/core": "^0.6.0",
+    "@jsudc/core": "^0.7.0",
     "@types/node": "^24",
     "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.5",
