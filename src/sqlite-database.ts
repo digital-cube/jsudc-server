@@ -83,9 +83,22 @@ export interface SqliteDatabaseOptions {
    * a no-op on `:memory:`.
    */
   wal?: boolean | undefined;
+  /**
+   * Notice commits that other connections make to the file (another process:
+   * a customer's tool, the `sqlite3` shell) by polling `PRAGMA data_version`
+   * on the write connection, and call the `onExternalWrite` listeners — a
+   * change feed then tells every stream of the collections served from the
+   * file that they changed (no row ids). `true` polls every
+   * `DEFAULT_SQLITE_WATCH_MS` (1000 ms); `{ intervalMs }` sets the interval.
+   * Commits through this object are never reported. Off by default: nothing
+   * polls. It says THAT the file changed, not which rows.
+   */
+  watch?: boolean | { intervalMs?: number | undefined } | undefined;
 }
 
 export const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 5000;
+/** The polling interval of `SqliteDatabaseOptions.watch: true`. */
+export const DEFAULT_SQLITE_WATCH_MS = 1000;
 
 /** SQLITE_BUSY (5) or SQLITE_LOCKED (6), with any extended code, as `node:sqlite` or `better-sqlite3` report it. */
 export function isSqliteBusy(err: unknown): boolean {
@@ -145,17 +158,26 @@ interface Waiter {
  *   else waits for the transaction to end.
  * - `read(fn)` runs `fn` on one snapshot of the committed rows.
  *
+ * - With `watch`, `onExternalWrite` listeners hear of commits other
+ *   connections made to the file (see `SqliteDatabaseOptions.watch`).
+ *
  * Nothing is cached about rows between calls: other processes write the file.
  */
 export class SqliteDatabase {
   readonly name: string;
   readonly busyTimeoutMs: number;
+  /** How often `PRAGMA data_version` is polled; `undefined`: `watch` is off and nothing polls. */
+  readonly watchIntervalMs: number | undefined;
   private readonly writer: SqliteConnection;
   private readonly reader: SqliteConnection | undefined;
   private readonly als = new AsyncLocalStorage<TxScope>();
   private held = false;
   private readonly waiting: Waiter[] = [];
   private closed = false;
+  private readonly externalListeners = new Set<() => void>();
+  private watchTimer: ReturnType<typeof setInterval> | undefined;
+  /** The write connection's `data_version` at the last poll. */
+  private dataVersion: number | undefined;
 
   constructor(opts: SqliteDatabaseOptions) {
     this.writer = opts.write;
@@ -164,6 +186,19 @@ export class SqliteDatabase {
     this.busyTimeoutMs = opts.busyTimeoutMs ?? DEFAULT_SQLITE_BUSY_TIMEOUT_MS;
     if (!Number.isInteger(this.busyTimeoutMs) || this.busyTimeoutMs < 0) {
       throw new Error(`SqliteDatabase: busyTimeoutMs must be a non-negative integer`);
+    }
+    const watch = opts.watch;
+    this.watchIntervalMs =
+      watch === undefined || watch === false
+        ? undefined
+        : watch === true
+          ? DEFAULT_SQLITE_WATCH_MS
+          : (watch.intervalMs ?? DEFAULT_SQLITE_WATCH_MS);
+    if (
+      this.watchIntervalMs !== undefined &&
+      (!Number.isInteger(this.watchIntervalMs) || this.watchIntervalMs < 1)
+    ) {
+      throw new Error(`SqliteDatabase: watch.intervalMs must be a positive integer`);
     }
     // The writer waits for the lock itself, asynchronously; a reader waits in SQLite
     // (in WAL mode only for a checkpoint or a recovery, briefly).
@@ -277,10 +312,86 @@ export class SqliteDatabase {
     return { rows: method === "get" ? (rows[0] as unknown[]) : rows };
   };
 
+  /**
+   * Call `listener` after other connections committed to the file (another
+   * process, or a connection of this process that does not go through this
+   * object), at most once per poll however many commits there were; returns
+   * its unsubscribe. Only with `watch`: without it the listener is kept and
+   * never called, and nothing polls. Polling runs while at least one
+   * listener is registered, and stops at `close`. A listener that throws is
+   * ignored.
+   */
+  onExternalWrite(listener: () => void): () => void {
+    this.externalListeners.add(listener);
+    this.startWatching();
+    return () => {
+      this.externalListeners.delete(listener);
+      if (this.externalListeners.size === 0) this.stopWatching();
+    };
+  }
+
+  /** Whether `data_version` is being polled now. */
+  get watching(): boolean {
+    return this.watchTimer !== undefined;
+  }
+
+  /**
+   * One poll, which the interval runs: when the write connection's
+   * `data_version` moved since the last one, call the listeners. Exposed for
+   * tests and for a host that wants to check at once (after a known external
+   * import); a no-op without `watch`, after `close`, or while a transaction of
+   * this object is open or waiting (the next poll sees it).
+   */
+  pollExternalWrites(): boolean {
+    if (this.watchIntervalMs === undefined || this.closed || this.held) return false;
+    let version: number;
+    try {
+      // The write connection's own commits never move its data_version; every other
+      // connection's do (the read connection writes nothing). So nothing of ours is
+      // announced, and no commit of another process slips in unseen between one of ours
+      // and a bookkeeping step.
+      const row = this.writer.all("PRAGMA data_version", [])[0];
+      version = Number(row?.data_version);
+    } catch {
+      // The file is locked for a moment (a recovery, another process's exclusive lock):
+      // the next poll sees what changed.
+      return false;
+    }
+    if (!Number.isFinite(version)) return false;
+    const before = this.dataVersion;
+    this.dataVersion = version;
+    if (before === undefined || before === version) return false;
+    for (const listener of [...this.externalListeners]) {
+      try {
+        listener();
+      } catch {
+        // A listener's failure is its own; the others still hear of the change.
+      }
+    }
+    return true;
+  }
+
+  private startWatching(): void {
+    if (this.watchIntervalMs === undefined || this.watchTimer || this.closed) return;
+    // The baseline: commits from here on are reported.
+    this.dataVersion = undefined;
+    this.pollExternalWrites();
+    const timer = setInterval(() => this.pollExternalWrites(), this.watchIntervalMs);
+    timer.unref?.();
+    this.watchTimer = timer;
+  }
+
+  private stopWatching(): void {
+    if (this.watchTimer) clearInterval(this.watchTimer);
+    this.watchTimer = undefined;
+  }
+
   /** Close both connections; a transaction still waiting for its turn is refused. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopWatching();
+    this.externalListeners.clear();
     this.writer.close();
     this.reader?.close();
   }

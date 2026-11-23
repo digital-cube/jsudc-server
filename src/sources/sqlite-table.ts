@@ -322,6 +322,14 @@ export class SqliteTableSource implements Source {
   private readonly defaultSort: SortKey[] | undefined;
   private readonly onMutate: SqliteTableSourceOptions["onMutate"];
 
+  /**
+   * Commits other connections made to the database file, as the
+   * `SqliteDatabase` notices them (only with its `watch` option).
+   */
+  onExternalWrite(listener: () => void): () => void {
+    return this.db.onExternalWrite(listener);
+  }
+
   constructor(opts: SqliteTableSourceOptions) {
     const schema = opts.schema;
     const given = opts.fields ?? {};

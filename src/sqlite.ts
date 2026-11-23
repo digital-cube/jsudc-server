@@ -14,6 +14,7 @@ export {
 } from "./sources/sqlite-table.js";
 export {
   DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+  DEFAULT_SQLITE_WATCH_MS,
   isSqliteBusy,
   type SqliteConnection,
   SqliteDatabase,

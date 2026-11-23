@@ -32,6 +32,18 @@ The write side of `sqlite_table` completed: `mutate_many`, the host's
   `betterSqliteConnection(db)`, the `better-sqlite3` adapter of
   `SqliteDatabase` (same options as `openNodeSqlite`). `better-sqlite3` is a
   new optional peer, loaded only by that entry when it opens a file.
+- Writes other processes make to a SQLite file reach the change feed:
+  `watch` on `SqliteDatabase` (and `openNodeSqlite` / `openBetterSqlite`;
+  off by default, `true` = every `DEFAULT_SQLITE_WATCH_MS`, 1000 ms, or
+  `{ intervalMs }`) polls `PRAGMA data_version` on the write connection,
+  which moves only for other connections' commits, and calls the
+  `onExternalWrite(listener)` listeners. A dispatcher with a change feed
+  subscribes every collection whose source has `onExternalWrite`
+  (`sqlite_table` does), and `ChangeFeed.externalChange(collection)` tells
+  every stream of that collection in this process, scoped ones too, one
+  `update` without ids, through the burst control; it is not put on the bus.
+  The wrapper's own commits are never announced a second time.
+  `ChangeFeed.close()` unsubscribes, which stops the polling.
 
 ## [0.7.0] - 2026-11-23
 

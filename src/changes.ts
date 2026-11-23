@@ -6,6 +6,7 @@ import {
   ROW_ID,
 } from "@jsudc/core";
 import { type RowScopeOptions, rowScopePins } from "./scope.js";
+import type { Source } from "./sources/source.js";
 
 /**
  * The values of one or more changed rows that a row scope can test, kept on
@@ -269,6 +270,8 @@ export class ChangeFeed {
   private scope: RowScopeOptions = {};
   private readonly subscribers = new Set<ChangeSubscriber>();
   private unsubscribeBus: (() => void) | undefined;
+  /** Unsubscribes from the sources whose external writes this feed announces. */
+  private readonly watches = new Map<string, () => void>();
 
   constructor(opts: ChangeFeedOptions = {}) {
     this.bus = opts.bus ?? new MemoryChangeBus();
@@ -387,6 +390,41 @@ export class ChangeFeed {
     await this.publish({ collection, op, ids, match });
   }
 
+  /**
+   * Rows of `collection` changed and nobody knows which: another process
+   * wrote the file it is served from. Every stream of THIS process subscribed
+   * to the collection is told — a scoped one too, since its scope cannot be
+   * tested without rows — with one event without ids (`op: "update"`), through
+   * the stream's burst coalescing. It does not go on the bus: every server
+   * process that watches the file notices the write itself, and would
+   * otherwise tell each stream once per process.
+   */
+  externalChange(collection: string): void {
+    for (const sub of this.subscribers) {
+      if (!sub.scopes.has(collection)) continue;
+      try {
+        sub.send({ collection, op: "update" });
+      } catch (err) {
+        this.log?.error({ err, collection }, "udc change feed: send failed");
+      }
+    }
+  }
+
+  /**
+   * Announce the external writes of `collection`'s source
+   * (`Source.onExternalWrite`) with `externalChange`, until `close`.
+   * `createDispatcher` calls it for every collection of its registry; a
+   * second call for the same collection replaces the first.
+   */
+  watchExternal(collection: string, source: Pick<Source, "onExternalWrite">): void {
+    if (!source.onExternalWrite) return;
+    this.watches.get(collection)?.();
+    this.watches.set(
+      collection,
+      source.onExternalWrite(() => this.externalChange(collection)),
+    );
+  }
+
   /** Publish a notice on the bus; a failing bus is logged, never thrown into a committed write. */
   async publish(notice: ChangeNotice): Promise<void> {
     // Too many ids anywhere: none at all. A match whose ids were dropped would otherwise stand
@@ -447,8 +485,10 @@ export class ChangeFeed {
     }
   }
 
-  /** Stop listening to the bus and close it. Open streams end with their server. */
+  /** Stop announcing external writes, stop listening to the bus and close it. Open streams end with their server. */
   async close(): Promise<void> {
+    for (const unwatch of this.watches.values()) unwatch();
+    this.watches.clear();
     this.unsubscribeBus?.();
     this.unsubscribeBus = undefined;
     await this.bus.close?.();

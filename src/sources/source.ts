@@ -128,6 +128,14 @@ export interface Source {
    * of `sortable` (0.6.0). Absent: every field is sortable.
    */
   readonly notSortable?: readonly string[];
+  /**
+   * Call `listener` when the rows were written outside this process's own
+   * writes through jsudc (another process wrote the SQLite file); returns its
+   * unsubscribe. A dispatcher with a change feed subscribes every collection
+   * whose source has it, and the feed then tells every stream of the
+   * collection that it changed, without ids (`ChangeFeed.externalChange`).
+   */
+  onExternalWrite?(listener: () => void): () => void;
   /** The active schema document, `version` in its wire form (`"v<n>"`). */
   describe(sctx?: SourceContext): Promise<SchemaDoc>;
   list(req: SourceListRequest, sctx?: SourceContext): Promise<ListResponse>;
