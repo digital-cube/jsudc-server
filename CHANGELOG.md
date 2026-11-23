@@ -9,6 +9,15 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ### Added
 
+- `describe.sortable` (`@jsudc/core` 0.5.2): `{ fields }`, the live schema
+  fields in `field_order` that the source sorts on, without the scope's hidden
+  fields. A `PostgresTableSource` field with `sortable: false` is left out, so
+  a client no longer offers a sort the source refuses with `validation_error`.
+  New optional `Source.notSortable` (as `notFilterable`), set by
+  `PostgresTableSource` and carried by `withSearchIndex`; `sortableFields`,
+  `Described` and `SortableFields` are exported. Typed here, so the server
+  still builds against `@jsudc/core` 0.5.0.
+
 - `describe` leaves a schema field out of the table on request: a column marked
   `hidden: true` is not served (and its field gets no default column), and a
   view with `columns_mode: listed` gets no default column for the fields it

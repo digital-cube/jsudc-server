@@ -267,7 +267,10 @@ has one value per row (a column of a `LATERAL` join, or a correlated subquery
 in `sql`). An aggregate over a grouped `FROM` would not be valid in a `WHERE`:
 mark such a field `{ sql: …, filterable: false, sortable: false }`. A field
 with `filterable: false` is refused in a filter exactly like an unknown field
-and left out of `describe.filterable`; `sortable: false` refuses it in a sort.
+and left out of `describe.filterable`; `sortable: false` refuses it in a sort
+and leaves it out of `describe.sortable` (0.5.2), so `@jsudc/react` draws its
+header as plain text instead of a sort button. A host source of its own says
+the same with `Source.notSortable`.
 The host's row scope may still use it.
 
 | Option                     | What                                                                                                |

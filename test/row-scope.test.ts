@@ -16,6 +16,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { createCollectionTableSql } from "../src/db/schema.js";
+import type { Described } from "../src/describe.js";
 import { createDispatcher } from "../src/dispatcher.js";
 import { CollectionRegistry } from "../src/registry.js";
 import { MemorySource } from "../src/sources/memory.js";
@@ -552,7 +553,9 @@ describe.each(BACKENDS)("row scope on $name", (backend) => {
         filters: d.view.filters?.map((f) => f.field),
         viewFilterable: d.view.filterable?.fields,
         filterable: d.filterable.fields.map((f) => f.field),
+        sortable: (d as Described).sortable?.fields,
       });
+      expect((d as Described).sortable?.fields).toContain("subject");
       expect(JSON.parse(text)).toMatchObject({ search: ["subject"], filters: ["folder"] });
       expect(d.view.columns?.slice(0, 2).map((c) => c.field)).toEqual(["subject", "folder"]);
       expect(text).not.toContain("tenant");

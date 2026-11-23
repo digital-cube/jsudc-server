@@ -1,6 +1,6 @@
 import { SchemaDocSchema, ViewConfigSchema } from "@jsudc/core";
 import { describe, expect, it } from "vitest";
-import { filterableFields } from "../src/describe.js";
+import { buildDescribe, filterableFields, sortableFields } from "../src/describe.js";
 
 const schema = SchemaDocSchema.parse({
   version: "v1",
@@ -74,5 +74,34 @@ describe("filterableFields", () => {
         label: "Naziv",
       },
     ]);
+  });
+});
+
+describe("sortableFields", () => {
+  it("lists the live fields in field_order, without the deleted and the refused", () => {
+    expect(sortableFields(schema)).toEqual({ fields: ["name", "born", "kind"] });
+    expect(sortableFields(schema, ["born"])).toEqual({ fields: ["name", "kind"] });
+  });
+
+  it("is what buildDescribe answers as describe.sortable", () => {
+    const caps = {
+      mutate: true,
+      subscribe: false,
+      total_count: true,
+      schema_edit: false,
+      config_edit: false,
+      reindex: false,
+      tree_reparent: false,
+      source_yaml: false,
+      supported_filter_ops: [],
+    };
+    const view = ViewConfigSchema.parse({});
+    expect(buildDescribe("c", caps, schema, view).sortable).toEqual({
+      fields: ["name", "born", "kind"],
+    });
+    expect(
+      buildDescribe("c", caps, schema, view, { source_kind: "memory", notSortable: ["kind"] })
+        .sortable,
+    ).toEqual({ fields: ["name", "born"] });
   });
 });

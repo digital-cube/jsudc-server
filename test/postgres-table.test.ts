@@ -17,6 +17,7 @@ import {
 } from "@jsudc/core";
 import { sql } from "drizzle-orm";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { Described } from "../src/describe.js";
 import { createDispatcher } from "../src/dispatcher.js";
 import { encodeCursor, makeSource, PostgresTableSource } from "../src/index.js";
 import { CollectionRegistry, loadRegistry } from "../src/registry.js";
@@ -373,6 +374,70 @@ describe("a field marked not filterable", () => {
       tree_reparent: false,
       paging: ["cursor", "offset"],
     });
+  });
+});
+
+describe("a field marked not sortable", () => {
+  async function describeMessages(view: unknown = {}) {
+    const registry = new CollectionRegistry();
+    registry.register({
+      name: "messages",
+      source: messages(),
+      view: ViewConfigSchema.parse(view),
+    });
+    const dispatcher = createDispatcher(registry, { log: { error: vi.fn() } });
+    const res = await dispatcher.dispatch({
+      kind: requestKind("describe"),
+      id: "1",
+      payload: { collection: "messages" },
+    });
+    return res.payload as Described;
+  }
+
+  it("is listed in notSortable and left out of describe.sortable, which lists the others", async () => {
+    expect(messages().notSortable).toEqual(["secret"]);
+    const d = await describeMessages();
+    expect(d.sortable?.fields).toEqual(
+      messageSchema.field_order.filter((f) => f !== "secret" && !messageSchema.fields[f]?.deleted),
+    );
+    expect(d.sortable?.fields).toContain("subject");
+    expect(d.sortable?.fields).toContain("attachment_count");
+    expect(d.sortable?.fields).not.toContain("secret");
+    // Still a column the table draws, and still in the schema.
+    expect(d.view.columns.map((c) => c.field)).toContain("secret");
+  });
+
+  it("describe.sortable lists exactly what list accepts in a sort", async () => {
+    const d = await describeMessages();
+    const src = messages();
+    for (const field of d.sortable?.fields ?? []) {
+      await expect(src.list({ sort: [{ field }], page: { limit: 1 } })).resolves.toBeDefined();
+    }
+    await rejectsWith(src.list({ sort: [{ field: "secret" }] }), "validation_error");
+  });
+
+  it("only one sortable field: the source a mailbox declares", async () => {
+    const only = new PostgresTableSource({
+      db,
+      schema: messageSchema,
+      from: FROM_WITH_JOIN,
+      idColumn: "m.id",
+      fields: Object.fromEntries(
+        messageSchema.field_order
+          .filter((f) => f !== "size" && !messageSchema.fields[f]?.deleted)
+          .map((f) => [f, { sql: "NULL", sortable: false }]),
+      ),
+    });
+    expect(only.notSortable).not.toContain("size");
+    const registry = new CollectionRegistry();
+    registry.register({ name: "only", source: only, view: ViewConfigSchema.parse({}) });
+    const dispatcher = createDispatcher(registry, { log: { error: vi.fn() } });
+    const res = await dispatcher.dispatch({
+      kind: requestKind("describe"),
+      id: "1",
+      payload: { collection: "only" },
+    });
+    expect((res.payload as Described).sortable).toEqual({ fields: ["size"] });
   });
 });
 

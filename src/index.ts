@@ -45,7 +45,13 @@ export { deriveColumns } from "./columns.js";
 export { connect, type Db, type DbHandle, type Executor } from "./db/client.js";
 export { ensureUdcSchema, UDC_MIGRATIONS_DIR, udcMigrations } from "./db/ensure.js";
 export { collectionTable, createCollectionTableSql, udcSchemaRevisions } from "./db/schema.js";
-export { buildDescribe, filterableFields } from "./describe.js";
+export {
+  buildDescribe,
+  type Described,
+  filterableFields,
+  type SortableFields,
+  sortableFields,
+} from "./describe.js";
 export {
   createDispatcher,
   Dispatcher,

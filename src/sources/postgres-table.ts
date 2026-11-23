@@ -98,7 +98,7 @@ export interface TableFieldSpec {
   readOnly?: boolean | undefined;
   /** `false`: refused in a filter like an unknown field and left out of `describe.filterable`. */
   filterable?: boolean | undefined;
-  /** `false`: refused in a sort like an unknown field. */
+  /** `false`: refused in a sort like an unknown field and left out of `describe.sortable`. */
   sortable?: boolean | undefined;
   /** An array field stored as a Postgres array (`text[]`, the default) or a jsonb array. */
   array?: SqlArrayForm | undefined;
@@ -247,6 +247,8 @@ export class PostgresTableSource implements Source {
   readonly capabilities: Capabilities;
   /** The fields a client may not filter by (`filterable: false`); left out of `describe.filterable`. */
   readonly notFilterable: readonly string[];
+  /** The fields a client may not sort by (`sortable: false`); left out of `describe.sortable`. */
+  readonly notSortable: readonly string[];
   /** The fields that are computed (an SQL expression): read, never written. */
   readonly computedFields: readonly string[];
   /** Every field a request may not write: computed, `readOnly`, or a column of another table of a `from`. */
@@ -329,6 +331,7 @@ export class PostgresTableSource implements Source {
     }
     this.selected = live.map((field) => ({ field, expr: exprs[field] as SQL }));
     this.notFilterable = notFilterable;
+    this.notSortable = notSortable;
     this.computedFields = computed;
     this.onMutate = opts.onMutate;
     this.search = opts.search;

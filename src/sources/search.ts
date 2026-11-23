@@ -151,6 +151,7 @@ export function withSearchIndex(source: Source, opts: SearchIndexOptions): Sourc
     ...(source.kind === undefined ? {} : { kind: source.kind }),
     ...(source.enforcesRowScope === undefined ? {} : { enforcesRowScope: source.enforcesRowScope }),
     ...(source.notFilterable === undefined ? {} : { notFilterable: source.notFilterable }),
+    ...(source.notSortable === undefined ? {} : { notSortable: source.notSortable }),
     describe: source.describe.bind(source),
     read: source.read.bind(source),
     mutate: source.mutate.bind(source),
