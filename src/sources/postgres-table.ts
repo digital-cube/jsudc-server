@@ -403,7 +403,7 @@ export class PostgresTableSource implements Source {
     const pageWhere = after
       ? sql`${where} AND ${cursorPredicate(terms, after.values, after.id, r)}`
       : where;
-    const keyCols = terms.length > 0 ? sql`, ${sortKeyColumns(terms)}` : sql``;
+    const keyCols = terms.length > 0 ? sql`, ${sortKeyColumns(terms, r)}` : sql``;
 
     // One extra row tells whether there is a next page.
     const rowsQuery = this.db.execute<TableRow>(sql`

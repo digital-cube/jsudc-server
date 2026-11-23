@@ -195,7 +195,9 @@ const RESOLVERS: [string, FieldResolver][] = [
   [
     "columns (text[] arrays, integer id)",
     columnResolver({
-      fields: Object.fromEntries(schema.field_order.map((f) => [f, sql.identifier(`c_${f}`)])),
+      fields: Object.fromEntries(
+        schema.field_order.map((f) => [f, sql`${sql.identifier(`c_${f}`)}`]),
+      ),
       id: sql`pk`,
       idType: "integer",
     }),
