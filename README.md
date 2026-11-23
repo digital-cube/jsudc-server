@@ -400,9 +400,11 @@ dialect), `read`, `mutate` (insert, partial update, delete) and
 takes the options of `PostgresTableSourceOptions` that carry over — `schema`,
 `table`, `fields` (`column`, `sql`, `computed`, `readOnly`, `filterable`,
 `sortable`), `idColumn`, `idType`, `versionColumn`, `readOnly`, `onMutate`,
-`where`, `totalCount`, `keepNulls`, `pageSizeDefault`, `defaultSort` — and a
-`db`. There is no `from` with joins (a computed field can still be a
-correlated subquery), no search and no tree reparent: `capabilities` says so.
+`where`, `search`, `totalCount`, `keepNulls`, `pageSizeDefault`,
+`defaultSort` — and a `db`. There is no `from` with joins (a computed field
+can still be a correlated subquery) and no tree reparent: `capabilities` says
+so. `search` answers the search box with FTS5 (see
+[On `sqlite_table`: FTS5](#on-sqlite_table-fts5)).
 `reindex` is there (`capabilities.reindex` when the source writes), so a
 kanban board over a SQLite table can always be reordered.
 
@@ -1145,6 +1147,116 @@ await client.list({ collection: "message", search: "invoice -draft", page: { lim
 // ORDER BY (ts_rank(tsv, websearch_to_tsquery('simple', $3))) DESC NULLS LAST, id ASC LIMIT 51 OFFSET 0
 ```
 
+### On `sqlite_table`: FTS5
+
+`SqliteTableSource` takes the same `search` option (`SqliteTableSearch`:
+`match(q, text)`, optional `rank(q, text)`, SQL written in code, `q` the text
+as a bound parameter), with the same rules: the match is ANDed with the base
+`where`, the row scope and the client's filter in the source's one
+statement; a search without a `sort` comes by rank (ties by id), paged by
+offset with the search cursor; with a `sort`, or without `rank`, it is one
+more condition of an ordinary list. The recommended shape is an
+**external-content FTS5 table** over the collection's table, **kept in step
+by triggers in the database** — not by the source, because other processes
+write the file too (another server, a customer's tool, the `sqlite3` shell),
+and a trigger indexes their rows in their own transaction. Two helpers make
+it:
+
+- `sqliteFts5Sql({ table, columns, fts?, tokenize?, triggerPrefix? })` — the
+  migration text: `CREATE VIRTUAL TABLE <table>_fts USING fts5(<columns>,
+  content='<table>', content_rowid='rowid', tokenize='unicode61')`, an
+  `AFTER INSERT`, an `AFTER DELETE` and an `AFTER UPDATE OF <columns>`
+  trigger, and a `rebuild` that indexes the rows already there. All of it
+  `IF NOT EXISTS`, so it can run at every start.
+- `sqliteFts5Search({ table, fts?, weights?, prefix?, maxTerms? })` — the
+  `search` option over that table: `match` is `<table>.rowid IN (SELECT
+  rowid FROM <fts> WHERE <fts> MATCH ?)`, `rank` is `-bm25(<fts>, …weights)`
+  of the row (bm25 is lower for a better hit, so negated: higher first).
+
+The parameter bound to `MATCH` is not the raw text: FTS5 raises a syntax
+error on an unbalanced `"`, a bare `-`, `:` or `*`, `NEAR(`, a trailing
+`OR`. `fts5MatchExpression(text, { prefix, maxTerms })` makes one FTS5
+always accepts — every whitespace-separated term quoted (`"` doubled),
+the terms ANDed, the last one a prefix (`"invo"*`, for search as you type;
+`prefix: false` turns it off), terms with no letter or digit dropped. So
+operators and column filters typed into the box are plain words, and a text
+that leaves no term (`"`, `*`, `-`) matches nothing instead of failing.
+Use it in a `match` of your own as well.
+
+```sql
+-- What sqliteFts5Sql({ table: "note", columns: ["title", "body_text"] }) returns:
+CREATE VIRTUAL TABLE IF NOT EXISTS "note_fts" USING fts5("title", "body_text", content='note', content_rowid='rowid', tokenize='unicode61');
+CREATE TRIGGER IF NOT EXISTS "note_fts_ai" AFTER INSERT ON "note" BEGIN
+  INSERT INTO "note_fts"(rowid, "title", "body_text") VALUES (new.rowid, new."title", new."body_text");
+END;
+CREATE TRIGGER IF NOT EXISTS "note_fts_ad" AFTER DELETE ON "note" BEGIN
+  INSERT INTO "note_fts"("note_fts", rowid, "title", "body_text") VALUES ('delete', old.rowid, old."title", old."body_text");
+END;
+CREATE TRIGGER IF NOT EXISTS "note_fts_au" AFTER UPDATE OF "title", "body_text" ON "note" BEGIN
+  INSERT INTO "note_fts"("note_fts", rowid, "title", "body_text") VALUES ('delete', old.rowid, old."title", old."body_text");
+  INSERT INTO "note_fts"(rowid, "title", "body_text") VALUES (new.rowid, new."title", new."body_text");
+END;
+INSERT INTO "note_fts"("note_fts") VALUES ('rebuild');
+```
+
+```ts
+import { loadRegistry, makeSource } from "@jsudc/server";
+import {
+  openNodeSqlite,
+  SqliteTableSource,
+  sqliteFts5Search,
+  sqliteFts5Sql,
+} from "@jsudc/server/sqlite";
+
+const vault = openNodeSqlite("/var/lib/app/vault.db", { name: "vault" });
+await vault.exec(sqliteFts5Sql({ table: "note", columns: ["title", "body_text"] }));
+
+const registry = loadRegistry("./collections", (asset, reg) =>
+  asset.name === "notes"
+    ? new SqliteTableSource({
+        db: vault,
+        schema: asset.schema,
+        table: "note",
+        versionColumn: "version",
+        fields: { body: "body_text" },
+        // A title hit counts three times a body hit.
+        search: sqliteFts5Search({ table: "note", weights: [3, 1] }),
+      })
+    : makeSource(asset, { registry: reg, sqlite: { vault } }),
+);
+// list { search: "invoice octo" } → roughly (each MATCH ? bound to '"invoice" AND "octo"*'):
+// SELECT … FROM "note" WHERE 1 AND "owner" = ? AND 1
+//   AND ("note".rowid IN (SELECT rowid FROM "note_fts" WHERE "note_fts" MATCH ?))
+// ORDER BY CAST(((SELECT -bm25("note_fts", 3, 1) FROM "note_fts"
+//   WHERE "note_fts" MATCH ? AND rowid = "note".rowid)) AS REAL) DESC NULLS LAST, "id" ASC LIMIT 51 OFFSET 0
+```
+
+- **Tokenizer.** `unicode61` is the default: words of Unicode letters and
+  digits, case-folded, diacritics removed from Latin letters (`ručak` is
+  found by `rucak`; `đ` is a letter of its own, not a `d`). Pass `tokenize`
+  for another (`"unicode61 remove_diacritics 2"`, `"porter unicode61"`);
+  the source does not care which.
+- **Rowids.** The index is keyed by the table's `rowid`. A table whose id is
+  an `INTEGER PRIMARY KEY` keeps its rowids; one with a uuid or text id has
+  rowids that `VACUUM` may renumber — run `sqliteFts5RebuildSql(opts)` after
+  a `VACUUM` of such a file. `WITHOUT ROWID` tables cannot have an
+  external-content index.
+- **Writers.** Every writer goes through the triggers, the source's own
+  `mutate` and `mutate_many` included; the version trigger
+  (`sqliteVersionTriggerSql`) does not re-index a row, since it writes no
+  indexed column.
+- `search` is set in code, not in `source.yaml`: a collection with it is made
+  by the host (as above) rather than by `makeSource`.
+
+**FTS5 or `withSearchIndex`?** Use FTS5 when the text lives in the SQLite
+file and other processes write it: the index is part of the database, always
+in step, and the row scope, the filter and the rank run in one statement, so
+a page is never short. Use `withSearchIndex` when the index is a service of
+its own that the host keeps up to date (OpenSearch, a vector store) or needs
+what FTS5 lacks (semantic search, typo tolerance, one index over many
+collections), accepting that a page may come back shorter when the scope or
+the filter drops hits.
+
 ### An external index: `withSearchIndex`
 
 When the index lives outside the database (OpenSearch, Elasticsearch, a
@@ -1486,6 +1598,7 @@ From `@jsudc/server` (no database driver):
 | `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                                           |
 | `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                                                     |
 | `SqliteTableSource`, `SqliteTableSourceOptions`, `SqliteTableFieldSpec`, `SqliteOnMutateHook`, `sqliteVersionTriggerSql`           | the SQLite table source and its version trigger (see [`sqlite_table`](#sqlite_table-a-table-of-a-sqlite-file)) |
+| `SqliteTableSearch`, `sqliteFts5Search`, `sqliteFts5Sql`, `sqliteFts5RebuildSql`, `fts5MatchExpression`, `SqliteFts5…Options`      | the search box on a `sqlite_table` with FTS5 (see [On `sqlite_table`: FTS5](#on-sqlite_table-fts5))            |
 | `SqliteDatabase`, `SqliteConnection`, `SqliteExecutor`, `isSqliteBusy`, `DEFAULT_SQLITE_BUSY_TIMEOUT_MS`                           | the one object per SQLite file, over a driver adapter                                                          |
 
 From `@jsudc/server/sqlite` (`node:sqlite`, built into Node 24): `openNodeSqlite`,
