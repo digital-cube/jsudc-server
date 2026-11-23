@@ -43,11 +43,11 @@ const sqliteDouble = [
 ];
 
 /**
- * The jsonb mutate suite, against `postgres_table` too. Its `schema revisions` block is
+ * The jsonb mutate and reindex suites, against `postgres_table` too. Its `schema revisions` block is
  * about the jsonb source's revision store (a `postgres_table` serves its schema.json, no
  * revisions) and the jsonb constructor's checks: it does not run here.
  */
-const TABLE_MUTATE_SUITES = ["test/pg-mutate.test.ts"];
+const TABLE_MUTATE_SUITES = ["test/pg-mutate.test.ts", "test/reindex.test.ts"];
 
 /**
  * Vitest 5 types `testNamePattern` as a root option, but its runner applies the one of

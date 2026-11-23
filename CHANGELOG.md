@@ -7,6 +7,24 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `reindex` on `postgres_table` (`capabilities.reindex: true` when the source
+  writes), so a kanban board over a relational Postgres table no longer
+  answers `unsupported_op` once a drop finds two neighbours with adjacent
+  orders. The rows of the scope, inside the base `where` and the row scope,
+  are locked in the write table and renumbered `gap`, `2*gap`, … in their
+  current order (NULLs last, ties by id) in one transaction, each version
+  bumped; the order and scope fields must be writable columns of the write
+  table. The renumbered rows go to `changedRows`, so the change feed names
+  them. Works over a `from` with joins and a `writeTable`.
+
+### Changed
+
+- `sqlite_table` and `postgres_table` build their `reindex` statement with one
+  shared function (`reindexUpdate`, `src/sources/sql-reindex.ts`); the SQLite
+  statement is unchanged.
+
 ## [0.7.0] - 2026-11-23
 
 Three pieces of work, released together with `@jsudc/core` 0.7.0 and

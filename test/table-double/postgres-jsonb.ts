@@ -23,7 +23,12 @@ import { sql } from "drizzle-orm";
 import { afterAll } from "vitest";
 import { connect, type Db } from "../../src/db/client.js";
 import { PostgresTableSource } from "../../src/sources/postgres-table.js";
-import type { SourceContext, SourceListRequest, SourceMutation } from "../../src/sources/source.js";
+import type {
+  SourceContext,
+  SourceListRequest,
+  SourceMutation,
+  SourceReindex,
+} from "../../src/sources/source.js";
 
 // Not imported from ./helpers.js: helpers imports this module (through the alias).
 const TEST_DATABASE_URL =
@@ -124,6 +129,11 @@ export class PostgresJsonbSource {
   async mutate(m: SourceMutation, sctx?: SourceContext): Promise<Row> {
     await this.sync();
     return this.source.mutate(m, sctx);
+  }
+
+  async reindex(req: SourceReindex, sctx?: SourceContext): Promise<number> {
+    await this.sync();
+    return this.source.reindex(req, sctx);
   }
 
   /** (Re)build the typed table from the jsonb rows when they changed since the last copy. */
