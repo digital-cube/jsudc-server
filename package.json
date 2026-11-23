@@ -85,7 +85,7 @@
     "@biomejs/biome": "^2.5.15",
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^6.1.2",
-    "@jsudc/core": "github:digital-cube/jsudc-core#075aa6e083c0d98b5efc671a11854830dec85d84",
+    "@jsudc/core": "^0.6.0",
     "@types/node": "^24",
     "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.5",
