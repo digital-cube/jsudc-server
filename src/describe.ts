@@ -50,6 +50,32 @@ export function filterableFields(view: ViewConfig, schema: SchemaDoc): Filterabl
 }
 
 /**
+ * `describe.sortable` (core 0.5.2): the fields a client may sort by. Typed
+ * here rather than taken from `@jsudc/core`, so the server builds against a
+ * core that does not have it yet; such a core passes the key through.
+ */
+export interface SortableFields {
+  fields: string[];
+}
+
+/** The `describe` payload with `sortable` (core 0.5.2). */
+export type Described = DescribeResponse & { sortable?: SortableFields };
+
+/** The live schema fields in `field_order`, without those the source does not sort by. */
+export function sortableFields(
+  schema: SchemaDoc,
+  notSortable: Iterable<string> = [],
+): SortableFields {
+  const refused = new Set(notSortable);
+  return {
+    fields: schema.field_order.filter((f) => {
+      const def = schema.fields[f];
+      return def !== undefined && !def.deleted && !refused.has(f);
+    }),
+  };
+}
+
+/**
  * The `describe` payload: the source's active schema without its soft-deleted
  * fields, the view with its derived columns, and the README when there is one.
  */
@@ -62,10 +88,12 @@ export function buildDescribe(
     source_kind: SourceKind;
     docs?: CollectionDocs | undefined;
     source?: SourceInfo | undefined;
+    /** The fields the source refuses in a sort (`Source.notSortable`). */
+    notSortable?: readonly string[] | undefined;
   } = {
     source_kind: "postgres_jsonb",
   },
-): DescribeResponse {
+): Described {
   return {
     collection,
     capabilities,
@@ -84,5 +112,6 @@ export function buildDescribe(
       ),
     },
     filterable: { fields: filterableFields(view, active) },
+    sortable: sortableFields(active, about.notSortable),
   };
 }

@@ -1,7 +1,6 @@
 import {
   type Capabilities,
   type Condition,
-  type DescribeResponse,
   evaluateFilter,
   type FilterNode,
   isCondition,
@@ -17,7 +16,7 @@ import {
   UdcError,
 } from "@jsudc/core";
 import type { ChangeFeed } from "./changes.js";
-import { buildDescribe } from "./describe.js";
+import { buildDescribe, type Described } from "./describe.js";
 import type { Collection, CollectionRegistry } from "./registry.js";
 import { notFoundFailure, tooManyRows } from "./sources/bulk.js";
 import { assertValidRow, filterFields, notFound, withoutMeta } from "./sources/fields.js";
@@ -134,14 +133,14 @@ export function withoutFields(schema: SchemaDoc, hidden: ReadonlySet<string>): S
 }
 
 /** The `describe` answer without the hidden fields (schema, columns, filter builder, search, chips). */
-export function describeWithout(
-  d: DescribeResponse,
-  hidden: ReadonlySet<string>,
-): DescribeResponse {
+export function describeWithout<D extends Described>(d: D, hidden: ReadonlySet<string>): D {
   if (hidden.size === 0) return d;
   const { view } = d;
   return {
     ...d,
+    ...(d.sortable
+      ? { sortable: { fields: d.sortable.fields.filter((f) => !hidden.has(f)) } }
+      : {}),
     schema: withoutFields(d.schema, hidden),
     view: {
       ...view,
@@ -263,12 +262,13 @@ export class ScopedCollection {
     return this.source.describe(this.sctx);
   }
 
-  async describe(): Promise<DescribeResponse> {
+  async describe(): Promise<Described> {
     const c = this.collection;
     const d = buildDescribe(c.name, this.capabilities(), await this.schema(), c.view, {
       source_kind: this.source.kind ?? "postgres_jsonb",
       docs: c.docs,
       source: this.source.info?.(this.sctx),
+      notSortable: this.source.notSortable,
     });
     const notFilterable = new Set(this.source.notFilterable ?? []);
     const filterable =
