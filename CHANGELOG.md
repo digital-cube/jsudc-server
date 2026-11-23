@@ -7,9 +7,16 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
+What a mail client's list views asked for after 0.5.0, on the server side: the
+fields a source sorts on in `describe`, schema fields kept out of the table, a
+`postgres_table` default order and a checked `default_sort`; released together
+with `@jsudc/core` 0.6.0 and `@jsudc/react` 0.6.0.
+
 ### Added
 
-- `describe.sortable` (`@jsudc/core` 0.5.2): `{ fields }`, the live schema
+- `describe.sortable` (`@jsudc/core` 0.6.0): `{ fields }`, the live schema
   fields in `field_order` that the source sorts on, without the scope's hidden
   fields. A `PostgresTableSource` field with `sortable: false` is left out, so
   a client no longer offers a sort the source refuses with `validation_error`.
@@ -17,7 +24,6 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
   `PostgresTableSource` and carried by `withSearchIndex`; `sortableFields`,
   `Described` and `SortableFields` are exported. Typed here, so the server
   still builds against `@jsudc/core` 0.5.0.
-
 - `describe` leaves a schema field out of the table on request: a column marked
   `hidden: true` is not served (and its field gets no default column), and a
   view with `columns_mode: listed` gets no default column for the fields it
@@ -30,10 +36,17 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
   ranked search without a sort still comes by rank; cursor paging follows the
   default order. The constructor refuses a field that is unknown or
   `sortable: false`.
-- The registry refuses a view whose `default_sort` (`@jsudc/core` 0.5.2) names
+- The registry refuses a view whose `default_sort` (`@jsudc/core` 0.6.0) names
   a field the schema lacks or has deleted, names one twice, or is not a list
   of sort keys (`viewDefaultSortProblems`, exported). The key is read loosely,
   so this works against `@jsudc/core` ^0.5.0.
+
+### Changed
+
+- The `@jsudc/core` peer range is `^0.6.0` (`default_sort`, `hidden` and
+  `columns_mode`, `describe.sortable`, `width: fill` with `grow`, `min_width`
+  and `hide_below`); `^0.5.0` does not accept 0.6.0. The new keys are still
+  read loosely.
 
 ## [0.5.0] - 2026-11-22
 

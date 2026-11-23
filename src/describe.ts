@@ -50,7 +50,7 @@ export function filterableFields(view: ViewConfig, schema: SchemaDoc): Filterabl
 }
 
 /**
- * `describe.sortable` (core 0.5.2): the fields a client may sort by. Typed
+ * `describe.sortable` (core 0.6.0): the fields a client may sort by. Typed
  * here rather than taken from `@jsudc/core`, so the server builds against a
  * core that does not have it yet; such a core passes the key through.
  */
@@ -58,7 +58,7 @@ export interface SortableFields {
   fields: string[];
 }
 
-/** The `describe` payload with `sortable` (core 0.5.2). */
+/** The `describe` payload with `sortable` (core 0.6.0). */
 export type Described = DescribeResponse & { sortable?: SortableFields };
 
 /** The live schema fields in `field_order`, without those the source does not sort by. */
@@ -107,7 +107,7 @@ export function buildDescribe(
         view.columns,
         active,
         view.default_column_width,
-        // `columns_mode` is core 0.5.2's; read loosely so an older core parses it too.
+        // `columns_mode` is core 0.6.0's; read loosely so an older core parses it too.
         (view as { columns_mode?: unknown }).columns_mode === "listed" ? "listed" : "all",
       ),
     },
