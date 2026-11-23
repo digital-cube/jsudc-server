@@ -7,6 +7,18 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `PostgresTableSource` option `defaultSort` (as `ArraySource` has): the order
+  of a `list` whose `sort` is absent or empty, instead of the id alone. A
+  ranked search without a sort still comes by rank; cursor paging follows the
+  default order. The constructor refuses a field that is unknown or
+  `sortable: false`.
+- The registry refuses a view whose `default_sort` (`@jsudc/core` 0.5.2) names
+  a field the schema lacks or has deleted, names one twice, or is not a list
+  of sort keys (`viewDefaultSortProblems`, exported). The key is read loosely,
+  so this works against `@jsudc/core` ^0.5.0.
+
 ## [0.5.0] - 2026-11-22
 
 Many rows changed in one request (`mutate_many`) under the caller's context

@@ -275,6 +275,52 @@ describe("typed comparisons agree with the jsonb source", () => {
   });
 });
 
+describe("defaultSort", () => {
+  const sizes = (res: ListResponse) => res.rows.map((r) => r.size);
+  const bySize = () => messages({ defaultSort: [{ field: "size", dir: "desc" }] });
+
+  it("orders a list without a sort, or with an empty one", async () => {
+    expect(sizes(await bySize().list({}))).toEqual([40, 30, 20, 10, 5, undefined]);
+    expect(sizes(await bySize().list({ sort: [] }))).toEqual([40, 30, 20, 10, 5, undefined]);
+  });
+
+  it("gives way to the request's sort", async () => {
+    const res = await bySize().list({ sort: [{ field: "size" }] });
+    expect(sizes(res)).toEqual([5, 10, 20, 30, 40, undefined]);
+  });
+
+  it("pages by cursor in the default order, as by offset", async () => {
+    const src = bySize();
+    const seen: string[] = [];
+    let cursor: string | null | undefined;
+    do {
+      const res: ListResponse = await src.list({ page: { limit: 4, cursor } });
+      seen.push(...ids(res.rows));
+      cursor = res.next_cursor;
+    } while (cursor);
+    expect(seen).toEqual(ids((await src.list({ page: { limit: 100 } })).rows));
+  });
+
+  it("steps aside for a ranked search without a sort, and orders an unranked one", async () => {
+    const match = (q: unknown) => sql`m.subject_line ILIKE '%' || ${q} || '%'`;
+    const ranked = messages({
+      defaultSort: [{ field: "size" }],
+      search: { match, rank: () => sql`m.size` },
+    });
+    // By rank (size, higher first), not by the default (size ascending).
+    expect(sizes(await ranked.list({ search: "a" }))).toEqual([40, 20, 10, 5, undefined]);
+    const plain = messages({ defaultSort: [{ field: "size" }], search: { match } });
+    expect(sizes(await plain.list({ search: "a" }))).toEqual([5, 10, 20, 40, undefined]);
+  });
+
+  it("is refused at construction when it names a field that is unknown or not sortable", () => {
+    expect(() => messages({ defaultSort: [{ field: "nope" }] })).toThrow(
+      "PostgresTableSource: defaultSort names nope, not a sortable field",
+    );
+    expect(() => messages({ defaultSort: [{ field: "secret" }] })).toThrow(/names secret/);
+  });
+});
+
 describe("a field marked not filterable", () => {
   it("is refused in a filter and a sort like an unknown field, before any query", async () => {
     const src = messages();

@@ -132,6 +132,14 @@ A directory name is the collection name (`[a-z][a-z0-9_]*`). The documents'
 full dialect is defined by `@jsudc/core` (`ViewConfigSchema`,
 `SchemaDocSchema`, `SourceConfigSchema`).
 
+A view's `default_sort` (`- { field: received_at, dir: desc }`) is the order
+`@jsudc/react` asks for while the user has picked none, shown in the headers.
+The server checks its field names when it loads the registry
+(`viewDefaultSortProblems`) and refuses a view that names a field the schema
+lacks. A `postgres_table` source can also order a sortless `list` itself with
+its `defaultSort` option; that order reaches any client, but no UI shows it as
+a sort.
+
 ## The six sources
 
 `source.yaml` picks one with `kind`:
@@ -276,6 +284,7 @@ The host's row scope may still use it.
 | `totalCount`               | `false`: no `count(*)`, `total: null`, `capabilities.total_count: false` (default `true`)           |
 | `keepNulls`                | serve a NULL column as `null` instead of leaving it out                                             |
 | `pageSizeDefault`          | the page size without a `limit`                                                                     |
+| `defaultSort`              | the order of a `list` without a `sort` (`[{ field, dir }]`); a ranked search still comes by rank    |
 
 Every field of the schema must resolve: a field without an entry in `fields`
 reads the column of its own name. The row scope of a request (see
