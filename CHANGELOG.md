@@ -16,6 +16,15 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
   builder. `deriveColumns` takes the mode as an optional fourth argument
   (`"all"` by default). Both keys are read loosely, so `@jsudc/core` 0.5.0
   views carry them too.
+- `PostgresTableSource` option `defaultSort` (as `ArraySource` has): the order
+  of a `list` whose `sort` is absent or empty, instead of the id alone. A
+  ranked search without a sort still comes by rank; cursor paging follows the
+  default order. The constructor refuses a field that is unknown or
+  `sortable: false`.
+- The registry refuses a view whose `default_sort` (`@jsudc/core` 0.5.2) names
+  a field the schema lacks or has deleted, names one twice, or is not a list
+  of sort keys (`viewDefaultSortProblems`, exported). The key is read loosely,
+  so this works against `@jsudc/core` ^0.5.0.
 
 ## [0.5.0] - 2026-11-22
 

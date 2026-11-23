@@ -1,6 +1,12 @@
 import { join } from "node:path";
+import { SchemaDocSchema, ViewConfigSchema } from "@jsudc/core";
 import { describe, expect, it } from "vitest";
-import { CollectionRegistry, loadRegistry, readCollectionAssets } from "../src/registry.js";
+import {
+  CollectionRegistry,
+  loadRegistry,
+  readCollectionAssets,
+  viewDefaultSortProblems,
+} from "../src/registry.js";
 import { MemorySource } from "../src/sources/memory.js";
 import { COLLECTIONS_DIR } from "./helpers.js";
 
@@ -91,6 +97,10 @@ describe("collection registry", () => {
     ["map-without-options", /plain\/view\.yaml.*invalid.*lists map, so map_options/s],
     ["bad-chart", /series\/view\.yaml.*chart_options.*\n.*series\[1\]\.field: mem is not a field/s],
     ["bad-pie", /stars\/view\.yaml.*invalid.*a pie needs value_field/s],
+    [
+      "bad-default-sort",
+      /inbox\/view\.yaml.*default_sort.*\n.*default_sort\[1\]: recieved is not a field/s,
+    ],
   ])("fails startup on %s, naming the file", (dir, message) => {
     expect(() => readCollectionAssets(fixtures(dir))).toThrow(message);
   });
@@ -103,5 +113,33 @@ describe("collection registry", () => {
     registry.register(c);
     expect(() => registry.register(c)).toThrow(/twice/);
     expect(() => registry.get("y")).toThrow(/unknown collection/);
+  });
+});
+
+describe("viewDefaultSortProblems", () => {
+  const schema = SchemaDocSchema.parse({
+    version: "v1",
+    fields: { subject: { type: "string" }, gone: { type: "string", deleted: true } },
+  });
+  const view = (default_sort: unknown) => ViewConfigSchema.parse({ default_sort });
+
+  it("is empty without a default_sort, or with one that fits", () => {
+    expect(viewDefaultSortProblems(ViewConfigSchema.parse({}), schema)).toEqual([]);
+    expect(viewDefaultSortProblems(view([{ field: "subject", dir: "desc" }]), schema)).toEqual([]);
+  });
+
+  it("names a deleted field, a repeated field and a value that is not a list of sort keys", () => {
+    expect(
+      viewDefaultSortProblems(
+        view([{ field: "gone" }, { field: "subject" }, { field: "subject", dir: "desc" }]),
+        schema,
+      ),
+    ).toEqual([
+      "default_sort[0]: gone is not a field of the schema",
+      "default_sort[2]: subject is named twice",
+    ]);
+    expect(viewDefaultSortProblems(view("subject:desc"), schema)).toEqual([
+      "default_sort: a list of { field, dir: asc | desc }",
+    ]);
   });
 });

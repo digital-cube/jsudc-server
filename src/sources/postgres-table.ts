@@ -5,6 +5,7 @@ import {
   type Row,
   type RowProblem,
   type SchemaDoc,
+  type SortKey,
   UdcError,
   validateRow,
 } from "@jsudc/core";
@@ -175,6 +176,15 @@ export interface PostgresTableSourceOptions {
   /** `true`: a NULL column is served as `null`; by default it is left out of the row. */
   keepNulls?: boolean | undefined;
   pageSizeDefault?: number | undefined;
+  /**
+   * The order of a `list` that asks for none (an absent or empty `sort`), as
+   * `ArraySource` has: `[{ field: "received_at", dir: "desc" }]`. A ranked
+   * search without a sort still comes by rank. The fields must be sortable;
+   * the constructor refuses others. Default: the id alone. The client shows
+   * no sort for it: for an order the UI shows, give the view a
+   * `default_sort`.
+   */
+  defaultSort?: readonly SortKey[] | undefined;
 }
 
 const IDENT_PART = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
@@ -263,6 +273,7 @@ export class PostgresTableSource implements Source {
   private readonly writeSchema: SchemaDoc;
   private readonly onMutate: PostgresTableSourceOptions["onMutate"];
   private readonly search: PostgresTableSearch | undefined;
+  private readonly defaultSort: SortKey[] | undefined;
 
   constructor(opts: PostgresTableSourceOptions) {
     if ((opts.table === undefined) === (opts.from === undefined)) {
@@ -326,6 +337,15 @@ export class PostgresTableSource implements Source {
     this.writeSchema = withoutFields(schema, new Set(readOnly));
     this.filterSchema = withUnknown(schema, notFilterable);
     this.sortSchema = withUnknown(schema, notSortable);
+    if (opts.defaultSort?.length) {
+      for (const { field } of opts.defaultSort) {
+        const def = this.sortSchema.fields[field];
+        if (!def || def.deleted) {
+          throw new Error(`PostgresTableSource: defaultSort names ${field}, not a sortable field`);
+        }
+      }
+      this.defaultSort = [...opts.defaultSort];
+    }
     this.resolver = columnResolver({
       fields: exprs,
       arrayForms,
@@ -372,7 +392,7 @@ export class PostgresTableSource implements Source {
     if (text !== undefined && this.search?.rank && !req.sort?.length) {
       return this.listByRank(where, this.search.rank(q, text), req);
     }
-    const terms = compileSort(req.sort, this.sortSchema, r);
+    const terms = compileSort(req.sort?.length ? req.sort : this.defaultSort, this.sortSchema, r);
     const limit = req.page?.limit ?? this.pageSizeDefault;
     const cursor = req.page?.cursor;
     const offset = req.page?.offset ?? 0;

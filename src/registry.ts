@@ -13,6 +13,7 @@ import {
   type SchemaDoc,
   type SchemaDocInput,
   SchemaDocSchema,
+  SortKeySchema,
   type SourceConfig,
   SourceConfigSchema,
   treeOptionsProblems,
@@ -174,6 +175,7 @@ export function readCollectionAssets(dir: string): CollectionAsset[] {
           mapOptionsProblems(view.map_options, withHistoryFields(schema, history)),
       ],
       ["chart_options", view.chart_options && chartOptionsProblems(view.chart_options, schema)],
+      ["default_sort", viewDefaultSortProblems(view, schema)],
     ] as const;
     for (const [block, problems] of blocks) {
       if (problems && problems.length > 0) {
@@ -224,4 +226,28 @@ export function loadRegistry(
   }
   assertRegistryLinks(served, dir);
   return registry;
+}
+
+/**
+ * The view's `default_sort` against its schema: a key that is not a sort key,
+ * names a field the schema lacks (or has deleted), or repeats a field. Read
+ * loosely, so a server on `@jsudc/core` 0.5.0 (whose loose view parse keeps
+ * the key) checks it too; core 0.5.2 has the same check as
+ * `defaultSortProblems`, which this becomes once the dependency moves.
+ */
+export function viewDefaultSortProblems(view: ViewConfig, schema: SchemaDoc): string[] {
+  const raw = (view as { default_sort?: unknown }).default_sort;
+  if (raw === undefined) return [];
+  const parsed = SortKeySchema.array().safeParse(raw);
+  if (!parsed.success) return ["default_sort: a list of { field, dir: asc | desc }"];
+  const problems: string[] = [];
+  const seen = new Set<string>();
+  parsed.data.forEach(({ field }, i) => {
+    const def = Object.hasOwn(schema.fields, field) ? schema.fields[field] : undefined;
+    if (!def || def.deleted)
+      problems.push(`default_sort[${i}]: ${field} is not a field of the schema`);
+    else if (seen.has(field)) problems.push(`default_sort[${i}]: ${field} is named twice`);
+    seen.add(field);
+  });
+  return problems;
 }
