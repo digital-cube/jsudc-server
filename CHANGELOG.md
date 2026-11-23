@@ -7,6 +7,43 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+Needs the `@jsudc/core` that has the `sqlite_table` kind and the `busy` error
+code (the next core release).
+
+### Added
+
+- `sqlite_table`: `SqliteTableSource`, one table of a SQLite file with typed
+  columns — filter, sort, keyset and offset paging, `read`, and `mutate` with
+  the row scope in the `WHERE` of every statement (`enforcesRowScope`), its
+  `eq` pins written over an insert or a patch, the written row read back in
+  scope and the transaction rolled back when it left it. The options of
+  `PostgresTableSourceOptions` that carry over (no `from` with joins, no
+  `onMutate`, no search); `capabilities.mutate_many`, `reindex` and `search`
+  are off. Values are served in the protocol's JSON types without
+  `to_jsonb`. A `uuid` id is lower-case TEXT, assigned with
+  `crypto.randomUUID()` on insert.
+- `SqliteDatabase`, the one object per SQLite file a host shares with the
+  sources: one write connection behind an in-process queue, one read
+  connection, WAL, `BEGIN IMMEDIATE` for every write transaction, the write
+  lock waited for asynchronously up to `busyTimeoutMs` and then answered with
+  the protocol error `busy`. Code running inside a transaction joins it
+  (nested ones are savepoints); `proxy` is the callback of
+  `drizzle-orm/sqlite-proxy`. No driver is imported: a `SqliteConnection`
+  adapts one.
+- `@jsudc/server/sqlite`: `openNodeSqlite(path, opts)` and
+  `nodeSqliteConnection(db)`, the `node:sqlite` adapter (Node 24, no native
+  addon), with the wrapper and the source re-exported. The root entry stays
+  driver-free.
+- `sqliteVersionTriggerSql({ table, versionColumn })`: the `AFTER UPDATE`
+  trigger that bumps the version for writers that do not, never twice for
+  the source.
+- `makeSource` (root entry) makes a `sqlite_table` collection from
+  `source.yaml` over `SourceDeps.sqlite[options.database]`.
+- `npm run test:sqlite`: the SQLite suites, no database server needed. The
+  `sqlite` Vitest project now runs the jsonb read suites through
+  `SqliteTableSource`. `test:no-pg` also serves a `sqlite_table` collection
+  from the packed tarball (`NO_PG_CORE_DIR` installs a local core).
+
 ## [0.7.0] - 2026-11-23
 
 `@jsudc/server` imports without `pg`: everything that needs `pg` or a Postgres

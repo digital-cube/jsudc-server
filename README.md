@@ -35,6 +35,7 @@ needs `pg` installed.
 npm install @jsudc/server @jsudc/core fastify drizzle-orm zod
 # Postgres collections, the schema store and the Postgres bus (@jsudc/server/postgres):
 npm install pg
+# SQLite collections need nothing more: node:sqlite is built into Node 24 (@jsudc/server/sqlite)
 # the OpenAPI docs at /docs (on by default):
 npm install @fastify/swagger @fastify/swagger-ui fastify-type-provider-zod
 # or straight from a GitHub tag:
@@ -157,16 +158,18 @@ lacks. A `postgres_table` source can also order a sortless `list` itself with
 its `defaultSort` option; that order reaches any client, but no UI shows it as
 a sort.
 
-## The six sources
+## The seven sources
 
 `source.yaml` picks one with `kind`. The two Postgres kinds are made by
-`makeSource` of `@jsudc/server/postgres` (which makes the other four too) and
-need `pg`; the root entry's `makeSource` makes the other four:
+`makeSource` of `@jsudc/server/postgres` (which makes the other five too) and
+need `pg`; the root entry's `makeSource` makes the other five (`sqlite_table`
+over a database the host opened and passed in `SourceDeps.sqlite`):
 
 | `kind`                     | Rows                                                                                                | Writes                                      |
 | -------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | `postgres_jsonb` (default) | a table, every field in `data jsonb`; `options.table` overrides the name                            | mutate, schema edits, reindex, reparent     |
 | `postgres_table`           | an ordinary relational table with typed columns (see [below](#postgres_table-a-relational-table))   | mutate (plain columns)                      |
+| `sqlite_table`             | one table of a SQLite file, typed columns (see [below](#sqlite_table-a-table-of-a-sqlite-file))     | mutate (plain columns)                      |
 | `memory`                   | `seed.json`, kept in the process                                                                    | mutate, reindex, reparent (lost on restart) |
 | `filesystem`               | the entries of one folder under `options.root` (relative to the collection directory, no `..`)      | read-only                                   |
 | `http_api`                 | one upstream call (`base_url`, `list_endpoint`, `field_map`, …) cached for `cache_ttl_ms`           | read-only                                   |
@@ -387,6 +390,115 @@ new PostgresTableSource({
 // mutate {op: "update", id, row: {attachment_count: 0}}
 //   → validation_error, problems: [{field: "attachment_count", message: "is read-only"}]
 ```
+
+### `sqlite_table`: a table of a SQLite file
+
+The SQLite counterpart of `postgres_table`: one table, typed columns, the same
+filter operators, sort, keyset and offset paging (the compiler's SQLite
+dialect), `read`, and `mutate` (insert, partial update, delete) with the row
+scope inside every statement. `SqliteTableSource` takes the options of
+`PostgresTableSourceOptions` that carry over — `schema`, `table`, `fields`
+(`column`, `sql`, `computed`, `readOnly`, `filterable`, `sortable`),
+`idColumn`, `idType`, `versionColumn`, `readOnly`, `where`, `totalCount`,
+`keepNulls`, `pageSizeDefault`, `defaultSort` — and a `db`. There is no
+`from` with joins (a computed field can still be a correlated subquery), no
+`onMutate`, no `mutate_many`, no search and no reindex yet: `capabilities`
+says so.
+
+**One `SqliteDatabase` per file.** A SQLite handle is one connection: a
+statement the host ran on it while the source awaited inside a transaction
+would land inside that transaction. So the host opens each file once, as a
+`SqliteDatabase`, registers it under a name, and runs its own SQL through the
+same object:
+
+```ts
+import { buildApp, createDispatcher, loadRegistry, makeSource } from "@jsudc/server";
+import { openNodeSqlite } from "@jsudc/server/sqlite";
+import { drizzle } from "drizzle-orm/sqlite-proxy";
+
+// One write connection behind an in-process queue, one read-only read connection, WAL.
+const vault = openNodeSqlite("/var/lib/app/vault.db", { name: "vault", busyTimeoutMs: 5000 });
+const orm = drizzle(vault.proxy); // the host's own Drizzle shares it
+
+const registry = loadRegistry("./collections", (asset, reg) =>
+  makeSource(asset, { registry: reg, sqlite: { vault } }),
+);
+const dispatcher = createDispatcher(registry, {
+  rowScope: (ctx) => ({ field: "owner", op: "eq", value: ctx.user }),
+});
+const app = await buildApp({ dispatcher, registry, context: (req) => ({ user: userOf(req) }) });
+```
+
+```yaml
+# collections/notes/source.yaml
+kind: sqlite_table
+options:
+  database: vault # the name in SourceDeps.sqlite; default main
+  table: note # default: the collection name
+  id_type: uuid # uuid (default) | text | integer
+  version_column: version
+  columns: { body: body_text }
+```
+
+- `transaction(fn)` waits for the queue, then takes the file's write lock with
+  `BEGIN IMMEDIATE`, commits when `fn` resolves and rolls back when it throws.
+  Code running inside `fn` — awaited or not, through the object or its
+  `proxy` — runs in that transaction (a nested `transaction` is a
+  `SAVEPOINT`); code anywhere else waits. So a source's `mutate` called inside
+  a host's transaction is part of it, and a host write made while the
+  source's transaction is open (from a hook of the host) rolls back with it.
+- Other processes open the file too (a customer's tool, `sqlite3`, a backup).
+  The lock is waited for without blocking the event loop: `BEGIN IMMEDIATE`
+  is retried until `busyTimeoutMs` (default 5000) has passed, the in-process
+  queue counting towards it; then the answer is the protocol error **`busy`**
+  (`details: { database, waited_ms }`, nothing written, retry later). Reads go
+  to the read connection and never wait for a writer (WAL). Nothing about rows
+  is cached between requests.
+- `:memory:` has a single connection; reads then take their turn in the queue.
+- `better-sqlite3` and other drivers: implement `SqliteConnection` (`all`,
+  `values`, `run`, `exec`, `close`) and pass it to `new SqliteDatabase({ write,
+  read })`.
+
+**Storage.** Per field type, as `sqliteColumnResolver` expects: `integer` and
+`year` INTEGER, `decimal` NUMERIC, `bool` INTEGER 0/1, `date` TEXT
+`YYYY-MM-DD`, `datetime` TEXT in `sqliteDateTime`'s UTC form
+(`2021-05-31T22:00:00.000Z`), `string_array`, `lookup_array` and `json` TEXT
+holding JSON, the rest TEXT. Rows are served in the wire protocol's JSON
+types: numbers, booleans from 0/1, arrays and objects parsed, datetimes in the
+ISO form. A datetime another program wrote as `2021-06-01 10:00:00` is served
+as `2021-06-01T10:00:00.000Z`, but filters and sorts compare the stored text,
+so other writers should store the canonical form.
+
+**Ids.** `uuid` (the default) is a TEXT column holding the canonical
+lower-case 36-character form: the source assigns `crypto.randomUUID()` on an
+insert that carries none, checks the shape of one given through a field mapped
+to the id column, and lower-cases every id on the way in (a read, an update,
+a cursor), so it behaves like Postgres `uuid`. `integer` is an `INTEGER
+PRIMARY KEY` (assigned by SQLite), `text` the column's own value. Keep the
+table's `rowid` (no `WITHOUT ROWID`).
+
+**The version column.** Written 1 on insert, `version + 1` by every update
+the source makes, and `expected_version` checked inside the `UPDATE` /
+`DELETE` statement itself (next to the id, the base `where` and the row
+scope). For writers that do not bump it, install the trigger
+`sqliteVersionTriggerSql({ table, versionColumn })` returns: it adds 1 after an
+`UPDATE` that left the version unchanged, and stays quiet for one that changed
+it. That is the one supported arrangement — **the source bumps, the trigger
+covers everyone else** — and it never bumps twice:
+
+```sql
+CREATE TRIGGER IF NOT EXISTS "note_version_bump" AFTER UPDATE ON "note"
+FOR EACH ROW WHEN NEW."version" IS OLD."version"
+BEGIN
+  UPDATE "note" SET "version" = coalesce(OLD."version", 0) + 1 WHERE rowid = NEW.rowid;
+END;
+```
+
+**Row scope.** `enforcesRowScope` is `true`: the scope is in the `WHERE` of
+every `SELECT`, `UPDATE` and `DELETE`; its `eq` pins are written over an
+insert or a patch; the written row is read back, and a row that left the scope
+(or the base `where`) rolls the whole transaction back with `forbidden`
+(`reason: out_of_scope`).
 
 ## The SQL compiler
 
@@ -1289,8 +1401,8 @@ From `@jsudc/server` (no database driver):
 | `createDispatcher`, `Dispatcher`, `DispatchLogger`                                                                                 | every action wired to a registry; `Dispatcher` to register actions of your own           |
 | `HostActionHandler`, `DEFAULT_MUTATE_MANY_LIMIT`                                                                                   | a host action's handler type (see [Host actions](#host-actions)); the `mutate_many` cap  |
 | `loadRegistry`, `readCollectionAssets`, `CollectionRegistry`, `Collection`, `CollectionAsset`                                      | read a collection directory; the served collections                                      |
-| `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for: memory, filesystem, http_api, yaml_menu               |
-| `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                                                              | four of the six sources, usable directly                                                 |
+| `makeSource`, `SourceDeps`                                                                                                         | the source `source.yaml` asks for: memory, filesystem, http_api, yaml_menu, sqlite_table |
+| `MemorySource`, `FilesystemSource`, `HttpApiSource`, `YamlMenuSource`                                                              | four of the seven sources, usable directly                                               |
 | `compileFilter`, `compileSort`, `orderBy`, `sortKeyColumns`, `cursorPredicate`, `encodeCursor`, `decodeCursor`, `FieldResolver`, … | the SQL compiler, for a source of your own (see [The SQL compiler](#the-sql-compiler))   |
 | `ArraySource`, `Source` and its request types                                                                                      | to write a source of your own: implement `Source`, or extend `ArraySource` over an array |
 | `OnMutateResult`, `RowChange`                                                                                                      | what an `onMutate` hook gets and returns                                                 |
@@ -1306,6 +1418,12 @@ From `@jsudc/server` (no database driver):
 | `registerChangesRoute`, `ChangesRouteOptions`, `ChangeSubscriber`, `eventFor`, `scopeValues`, `MAX_CHANGE_COLLECTIONS`             | the stream route on its own, and the scope rule's pieces                                 |
 | `BlobRouteOptions`                                                                                                                 | `registerBlobRoute(app, registry, {context, scope})`                                     |
 | `mapItems`, `interpolateHeaders`, `httpSourcesEnabled`, `filesystemRoot`, `cacheTtlEnvVar`, `rootEnvVar`                           | the pieces the http_api and filesystem sources are made of                               |
+| `SqliteTableSource`, `SqliteTableSourceOptions`, `SqliteTableFieldSpec`, `sqliteVersionTriggerSql`                                 | the SQLite table source and its version trigger (see [`sqlite_table`](#sqlite_table-a-table-of-a-sqlite-file)) |
+| `SqliteDatabase`, `SqliteConnection`, `SqliteExecutor`, `isSqliteBusy`, `DEFAULT_SQLITE_BUSY_TIMEOUT_MS`                           | the one object per SQLite file, over a driver adapter                                    |
+
+From `@jsudc/server/sqlite` (`node:sqlite`, built into Node 24): `openNodeSqlite`,
+`OpenNodeSqliteOptions` and `nodeSqliteConnection` — a file opened as one
+`SqliteDatabase` — and the SQLite exports of the root entry again.
 
 From `@jsudc/server/postgres` (needs `pg`):
 
@@ -1337,7 +1455,11 @@ which runs the jsonb filter and paging suites (`pg-filter`, `pg-paging`,
 `pg-parity`, `pg-array`, `pg-allowlist`) a second time, unchanged, with
 `PostgresJsonbSource` aliased to `test/table-double/postgres-jsonb.ts`: a double
 that copies the rows into a table with real typed columns and serves it through
-`PostgresTableSource`.
+`PostgresTableSource`. The `sqlite` project runs the same read suites through
+`SqliteTableSource` (`test/sqlite-double/`, the rows copied into `node:sqlite`
+`:memory:`), and `sqlite-table` runs `test/sqlite-table/` — the SQLite source
+and wrapper on `:memory:` and on temp files — without any database server
+(`npm run test:sqlite`).
 
 ```sh
 npm ci              # also builds dist (the prepare script)
@@ -1345,7 +1467,8 @@ npm run typecheck   # tsc --noEmit over src and test
 npm run lint        # Biome
 npm test            # Vitest, one file at a time (they share the database)
 npm run test:cov    # coverage, thresholds 80%
-npm run test:no-pg  # npm pack, install in an empty dir without pg, serve a memory collection
+npm run test:sqlite # the SQLite suites alone: no database server needed
+npm run test:no-pg  # npm pack, install in an empty dir without pg, serve memory and sqlite_table
 npm run build       # tsc -> dist (ESM + .d.ts)
 ```
 

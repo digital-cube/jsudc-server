@@ -2,10 +2,12 @@ import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { sourceGroup } from "@jsudc/core";
 import type { CollectionAsset, CollectionRegistry } from "../registry.js";
+import type { SqliteDatabase } from "../sqlite-database.js";
 import { FilesystemSource } from "./filesystem.js";
 import { type Env, type FetchLike, HttpApiSource, type SourceLog } from "./http-api.js";
 import { MemorySource } from "./memory.js";
 import type { Source } from "./source.js";
+import { SqliteTableSource } from "./sqlite-table.js";
 import { YamlMenuSource } from "./yaml-menu.js";
 
 /** `UDC_HTTP_SOURCES=off` (or `0`, `false`, `no`): no collection is fetched from the net. */
@@ -39,11 +41,19 @@ export interface SourceDeps {
   registry?: CollectionRegistry | undefined;
   /** An http_api source's line per upstream call and its credential warnings. */
   log?: SourceLog | undefined;
+  /**
+   * The SQLite database files the host opened, by the name a `sqlite_table`
+   * collection's `database` option gives (`main` when it gives none): one
+   * `SqliteDatabase` per file, shared with the host's own SQL
+   * (`openNodeSqlite` from `@jsudc/server/sqlite`).
+   */
+  sqlite?: Readonly<Record<string, SqliteDatabase>> | undefined;
 }
 
 /**
  * The source `source.yaml` asks for, for every kind that needs no database
- * driver: memory, filesystem, http_api and yaml_menu. A postgres_jsonb or
+ * driver: memory, filesystem, http_api, yaml_menu, and sqlite_table (over a
+ * `SqliteDatabase` of `deps.sqlite`, which the host opened with a driver). A postgres_jsonb or
  * postgres_table collection throws here — `makeSource` from
  * `@jsudc/server/postgres` makes those and every other kind. `null` for an http_api collection when
  * `UDC_HTTP_SOURCES` is off: the registry then does not serve it. With
@@ -63,6 +73,28 @@ export function makeSource(asset: CollectionAsset, deps: SourceDeps): Source | n
         `${asset.name}: a ${source.kind} collection is made by makeSource from ` +
           `"@jsudc/server/postgres" (npm install pg), not by the root entry's makeSource`,
       );
+    case "sqlite_table": {
+      const o = source.options;
+      const db =
+        deps.sqlite && Object.hasOwn(deps.sqlite, o.database) ? deps.sqlite[o.database] : undefined;
+      if (!db) {
+        throw new Error(
+          `${asset.name}: a sqlite_table collection needs the SQLite database "${o.database}" ` +
+            '(SourceDeps.sqlite; openNodeSqlite from "@jsudc/server/sqlite")',
+        );
+      }
+      return new SqliteTableSource({
+        db,
+        schema: asset.schema,
+        table: o.table ?? asset.name,
+        fields: o.columns,
+        idColumn: o.id_column,
+        idType: o.id_type,
+        versionColumn: o.version_column,
+        totalCount: o.total_count,
+        pageSizeDefault,
+      });
+    }
     case "memory":
       return new MemorySource({
         schema: asset.schema,

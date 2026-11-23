@@ -1,6 +1,8 @@
 // @jsudc/server: the UDC protocol served from a collection directory, over Fastify.
 // This entry imports no database driver: everything that needs `pg` or a
-// Postgres database is in `@jsudc/server/postgres` (src/postgres.ts).
+// Postgres database is in `@jsudc/server/postgres` (src/postgres.ts), and the
+// `node:sqlite` adapter is in `@jsudc/server/sqlite` (src/sqlite.ts). The
+// SQLite wrapper and the `sqlite_table` source need no driver and are here.
 
 export {
   buildApp,
@@ -153,7 +155,24 @@ export {
   sqliteQuery,
 } from "./sources/sqlite-sql.js";
 export {
+  type SqliteTableFieldSpec,
+  SqliteTableSource,
+  type SqliteTableSourceOptions,
+  sqliteVersionTriggerSql,
+} from "./sources/sqlite-table.js";
+export {
   type MenuCollection,
   YamlMenuSource,
   type YamlMenuSourceOptions,
 } from "./sources/yaml-menu.js";
+export {
+  DEFAULT_SQLITE_BUSY_TIMEOUT_MS,
+  isSqliteBusy,
+  type SqliteConnection,
+  SqliteDatabase,
+  type SqliteDatabaseOptions,
+  type SqliteExecutor,
+  type SqliteProxyCallback,
+  type SqliteRunResult,
+  type SqliteStatement,
+} from "./sqlite-database.js";
