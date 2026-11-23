@@ -8,7 +8,8 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 ## [Unreleased]
 
 The write side of `sqlite_table` completed: `mutate_many`, the host's
-`onMutate` hook, and a second driver. Nothing changes for a Postgres host.
+`onMutate` hook, and a second driver; and the search box answered by a
+`sqlite_table` with FTS5. Nothing changes for a Postgres host.
 
 ### Added
 
@@ -32,6 +33,19 @@ The write side of `sqlite_table` completed: `mutate_many`, the host's
   `betterSqliteConnection(db)`, the `better-sqlite3` adapter of
   `SqliteDatabase` (same options as `openNodeSqlite`). `better-sqlite3` is a
   new optional peer, loaded only by that entry when it opens a file.
+- `search` on `SqliteTableSource` (`SqliteTableSearch`: `match(q, text)`,
+  optional `rank(q, text)`), as on `postgres_table`: `capabilities.search:
+  "source"`, the match ANDed with the base `where`, the row scope and the
+  client's filter in the source's one statement, a search without a `sort`
+  by rank (ties by id) paged by offset with the search cursor.
+- FTS5 helpers: `sqliteFts5Sql(opts)` — an external-content FTS5 table over
+  the collection's table and the insert, delete and update triggers that keep
+  it in step in the database, whoever writes the file, plus a `rebuild`
+  (`sqliteFts5RebuildSql`); `sqliteFts5Search(opts)` — the `search` option
+  over it (`rowid IN (… MATCH ?)`, rank `-bm25()` with optional column
+  weights); `fts5MatchExpression(text)` — the search box's text as a MATCH
+  expression FTS5 never refuses (terms quoted and ANDed, the last a prefix; a
+  text with no term matches nothing). Default tokenizer `unicode61`.
 
 ## [0.7.0] - 2026-11-23
 

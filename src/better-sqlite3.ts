@@ -164,8 +164,19 @@ export function openBetterSqlite(path: string, opts: OpenBetterSqliteOptions = {
 }
 
 export {
+  type Fts5MatchOptions,
+  fts5MatchExpression,
+  type SqliteFts5Options,
+  type SqliteFts5SearchOptions,
+  type SqliteFts5SqlOptions,
+  sqliteFts5RebuildSql,
+  sqliteFts5Search,
+  sqliteFts5Sql,
+} from "./sources/sqlite-fts5.js";
+export {
   type SqliteOnMutateHook,
   type SqliteTableFieldSpec,
+  type SqliteTableSearch,
   SqliteTableSource,
   type SqliteTableSourceOptions,
   sqliteVersionTriggerSql,

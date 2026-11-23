@@ -24,7 +24,7 @@ import {
   withoutMeta,
 } from "./fields.js";
 import { type OnMutateResult, type RowChange, runOnMutate } from "./on-mutate.js";
-import { assertSearchable, searchText } from "./search.js";
+import { assertSearchable, encodeSearchCursor, searchPage, searchText } from "./search.js";
 import {
   ALL_FILTER_OPS,
   DEFAULT_ORDER_FIELD,
@@ -75,6 +75,25 @@ export interface SqliteTableFieldSpec {
   sortable?: boolean | undefined;
 }
 
+/**
+ * How a `sqlite_table` source matches the search box in SQL, written by the
+ * host in code: the counterpart of `PostgresTableSearch`. `q` is the search
+ * text as a bound parameter (never spliced into the statement); `text` is the
+ * same text, for a host that binds a parameter of its own made from it — an
+ * FTS5 `MATCH` expression, as `fts5MatchExpression` builds. `sqliteFts5Search`
+ * returns both functions for an FTS5 table kept by `sqliteFts5Sql`'s triggers.
+ */
+export interface SqliteTableSearch {
+  /** A condition true for a row that matches: `` sql`rowid IN (SELECT rowid FROM note_fts WHERE note_fts MATCH ${expr})` ``. */
+  match(q: SQL, text: string): SQL;
+  /**
+   * The relevance of a row, higher first: `` sql`-bm25(…)` `` in a correlated
+   * subquery. With it, a search without a `sort` comes by rank (ties by id),
+   * paged by offset. Without it, a search is ordered like any list.
+   */
+  rank?(q: SQL, text: string): SQL;
+}
+
 export interface SqliteTableSourceOptions {
   /** The database file's shared object; every statement goes through it. */
   db: SqliteDatabase;
@@ -109,6 +128,14 @@ export interface SqliteTableSourceOptions {
   onMutate?(ctx: unknown, change: RowChange, tx: SqliteExecutor): OnMutateResult;
   /** A condition (SQL, from code) ANDed into every statement. */
   where?: SQL | string | undefined;
+  /**
+   * The search box answered by this source (`capabilities.search: "source"`):
+   * the text of a `list` with `search` is matched by `search.match`, ANDed
+   * with the base `where`, the row scope and the client's filter, and ranked
+   * by `search.rank` when there is no `sort`. Without it a `search` is
+   * refused (`unsupported_op`) and the client composes `contains`.
+   */
+  search?: SqliteTableSearch | undefined;
   /** `false`: no `count(*)` next to the page; `total` is `null`. Default `true`. */
   totalCount?: boolean | undefined;
   /** `true`: a NULL column is served as `null`; by default it is left out of the row. */
@@ -116,8 +143,9 @@ export interface SqliteTableSourceOptions {
   pageSizeDefault?: number | undefined;
   /**
    * The order of a `list` that asks for none (an absent or empty `sort`):
-   * `[{ field: "received_at", dir: "desc" }]`. The fields must be sortable;
-   * the constructor refuses others. Default: the id alone.
+   * `[{ field: "received_at", dir: "desc" }]`. A ranked search without a sort
+   * still comes by rank. The fields must be sortable; the constructor refuses
+   * others. Default: the id alone.
    */
   defaultSort?: readonly SortKey[] | undefined;
 }
@@ -148,7 +176,7 @@ export type SqliteOnMutateHook<Ctx = unknown> = (
 const IDENT_PART = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
 
 /** `note` or `aux.note` as quoted identifiers; anything else is refused. */
-function identifier(name: string, what: string): SQL {
+export function identifier(name: string, what: string): SQL {
   const parts = name.split(".");
   if (parts.length > 2 || !parts.every((p) => IDENT_PART.test(p))) {
     throw new Error(`invalid ${what} ${JSON.stringify(name)}: a name or schema.name`);
@@ -160,7 +188,7 @@ function identifier(name: string, what: string): SQL {
 }
 
 /** A bare column name (no schema qualifier): what the version trigger and a write name. */
-function columnName(name: string, what: string): string {
+export function columnName(name: string, what: string): string {
   if (!IDENT_PART.test(name)) throw new Error(`invalid ${what} ${JSON.stringify(name)}`);
   return name;
 }
@@ -310,6 +338,7 @@ export class SqliteTableSource implements Source {
   private readonly resolver: FieldResolver;
   private readonly from: SQL;
   private readonly baseWhere: SQL;
+  private readonly search: SqliteTableSearch | undefined;
   private readonly version: SQL;
   private readonly selected: { field: string; expr: SQL; storage: Storage }[];
   private readonly storage: Readonly<Record<string, Storage>>;
@@ -336,6 +365,7 @@ export class SqliteTableSource implements Source {
     this.label = opts.table;
     this.from = identifier(opts.table, "table");
     this.baseWhere = opts.where === undefined ? sql`1` : sql`(${raw(opts.where)})`;
+    this.search = opts.search;
     const versionName =
       opts.versionColumn === undefined
         ? undefined
@@ -428,6 +458,7 @@ export class SqliteTableSource implements Source {
       tree_reparent: false,
       source_yaml: false,
       paging: ["cursor", "offset"],
+      ...(this.search ? { search: "source" as const } : {}),
       supported_filter_ops: ALL_FILTER_OPS,
     };
   }
@@ -441,13 +472,21 @@ export class SqliteTableSource implements Source {
     assertQueryFields(this.filterSchema, req.filter, undefined);
     assertQueryFields(this.sortSchema, undefined, req.sort);
     const text = searchText(req.search);
-    if (text !== undefined) assertSearchable(this.capabilities, this.label, text);
+    if (text !== undefined && !this.search) {
+      assertSearchable(this.capabilities, this.label, text);
+    }
     const r = this.resolver;
+    const q = sql`${text}`;
+    const match = text !== undefined && this.search ? this.search.match(q, text) : sql`1`;
+    // The client filter against what a client may filter by; the host's row scope against the whole schema.
     const where = sql`${this.baseWhere} AND ${this.scopeSql(sctx)} AND ${compileFilter(
       req.filter,
       this.filterSchema,
       r,
-    )}`;
+    )} AND (${match})`;
+    if (text !== undefined && this.search?.rank && !req.sort?.length) {
+      return this.listByRank(where, this.search.rank(q, text), req);
+    }
     const terms = compileSort(req.sort?.length ? req.sort : this.defaultSort, this.sortSchema, r);
     const limit = req.page?.limit ?? this.pageSizeDefault;
     const cursor = req.page?.cursor;
@@ -482,6 +521,32 @@ export class SqliteTableSource implements Source {
           ])
         : null;
     return { rows: page.map((row) => this.serialize(row)), next_cursor, total };
+  }
+
+  /**
+   * One page of a search in relevance order (ties by id), by offset or the
+   * cursor of the previous page. The rank is cast to REAL: a constant integer
+   * in `ORDER BY` would be read as a column number.
+   */
+  private async listByRank(where: SQL, rank: SQL, req: SourceListRequest): Promise<ListResponse> {
+    const { limit, offset } = searchPage(req, this.pageSizeDefault);
+    const { rows, total } = await this.db.read((q) => ({
+      rows: q.all<TableRow>(sql`
+        SELECT ${this.columns()}
+        FROM ${this.from}
+        WHERE ${where}
+        ORDER BY CAST((${rank}) AS REAL) DESC NULLS LAST, ${this.resolver.id} ASC
+        LIMIT ${limit + 1} OFFSET ${offset}`),
+      total: this.totalCount
+        ? (q.get<{ total: number }>(sql`SELECT count(*) AS total FROM ${this.from} WHERE ${where}`)
+            ?.total ?? 0)
+        : null,
+    }));
+    return {
+      rows: rows.slice(0, limit).map((row) => this.serialize(row)),
+      next_cursor: rows.length > limit ? encodeSearchCursor(offset + limit) : null,
+      total,
+    };
   }
 
   async read(id: string, sctx?: SourceContext): Promise<Row> {
