@@ -73,7 +73,16 @@ export function buildDescribe(
     ...(about.source ? { source: about.source } : {}),
     ...(about.docs ? { docs: about.docs } : {}),
     schema: presentedSchema(active),
-    view: { ...view, columns: deriveColumns(view.columns, active, view.default_column_width) },
+    view: {
+      ...view,
+      columns: deriveColumns(
+        view.columns,
+        active,
+        view.default_column_width,
+        // `columns_mode` is core 0.5.2's; read loosely so an older core parses it too.
+        (view as { columns_mode?: unknown }).columns_mode === "listed" ? "listed" : "all",
+      ),
+    },
     filterable: { fields: filterableFields(view, active) },
   };
 }

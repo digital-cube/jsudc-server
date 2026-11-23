@@ -81,4 +81,48 @@ describe("deriveColumns", () => {
       "a",
     ]);
   });
+
+  it("leaves a hidden column out, and adds no default column for its field", () => {
+    const cols = [{ field: "a" }, { field: "b", hidden: true }] as ColumnConfig[];
+    const out = deriveColumns(cols, schema({ a: S, b: S, c: S }), 100);
+    expect(out.map((c) => c.field)).toEqual(["a", "c"]);
+  });
+
+  it("hides one of the two columns a field backs", () => {
+    const cols = [
+      { field: "a", id: "a1" },
+      { field: "a", id: "a2", hidden: true },
+    ] as ColumnConfig[];
+    expect(deriveColumns(cols, schema({ a: S }), 100).map((c) => c.id)).toEqual(["a1"]);
+  });
+
+  it("places an unlisted field after a hidden column's neighbour as if the column were there", () => {
+    // field_order a, b, c; the view lists b (hidden) before a: c goes after b's place.
+    const cols = [{ field: "b", hidden: true }, { field: "a" }] as ColumnConfig[];
+    expect(deriveColumns(cols, schema({ a: S, b: S, c: S }), 100).map((c) => c.field)).toEqual([
+      "c",
+      "a",
+    ]);
+  });
+
+  it("adds no default column in listed mode", () => {
+    const cols: ColumnConfig[] = [{ field: "c" }, { field: "a" }];
+    const out = deriveColumns(cols, schema({ a: S, b: S, c: S }), 100, "listed");
+    expect(out).toEqual(cols);
+  });
+
+  it("drops hidden and deleted columns in listed mode too", () => {
+    const cols = [
+      { field: "a" },
+      { field: "b", hidden: true },
+      { field: "gone" },
+    ] as ColumnConfig[];
+    const out = deriveColumns(
+      cols,
+      schema({ a: S, b: S, gone: { type: "string", deleted: true } }),
+      100,
+      "listed",
+    );
+    expect(out.map((c) => c.field)).toEqual(["a"]);
+  });
 });
