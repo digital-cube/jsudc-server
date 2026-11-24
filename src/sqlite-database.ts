@@ -447,14 +447,34 @@ export class SqliteDatabase {
     this.watchTimer = undefined;
   }
 
-  /** Close both connections; a transaction still waiting for its turn is refused. */
+  /**
+   * Close both connections; a transaction still waiting for its turn is refused.
+   *
+   * The read-only connection closes first, then the write connection folds the
+   * WAL into the main file (`PRAGMA wal_checkpoint(TRUNCATE)`) and closes last:
+   * SQLite checkpoints and deletes `-wal` and `-shm` only on the close of the
+   * last connection to the file, and only when that connection can write. With
+   * another process still on the file, `-wal` stays, but every commit is in the
+   * main file once no reader of that process holds an older snapshot. Skipped
+   * (and nothing is folded in) while a transaction of this database is open:
+   * closing rolls it back.
+   */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     this.stopWatching();
     this.externalListeners.clear();
-    this.writer.close();
-    this.reader?.close();
+    try {
+      this.reader?.close();
+    } finally {
+      try {
+        if (!this.held) this.checkpointOnce("TRUNCATE");
+      } catch {
+        // Best effort: a failed checkpoint must not keep the write connection open.
+      } finally {
+        this.writer.close();
+      }
+    }
   }
 
   /** The protocol error of a write that could not get the file's write lock in time. */

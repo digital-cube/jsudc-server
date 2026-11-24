@@ -22,6 +22,14 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ### Fixed
 
+- `SqliteDatabase.close()` (`openNodeSqlite`, `openBetterSqlite`) folds the
+  WAL into the main file and removes `-wal` and `-shm`, as the README said it
+  did. It closed the write connection first and the read-only one last, and
+  SQLite checkpoints only on the close of the last connection, and only when
+  that one can write: the newest commits stayed in `-wal`, and a copy of the
+  main file alone made after `close()` could lack them (even the tables). It
+  now closes the reader, runs `wal_checkpoint(TRUNCATE)` on the writer
+  (skipped while a transaction is open) and closes the writer last.
 - `npm run test:sqlite` no longer needs Postgres: the root `globalSetup`
   created the test database even when only the SQLite project ran.
 
