@@ -7,6 +7,13 @@ All notable changes to `@jsudc/server` are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-24
+
+A test kit, a test suite that runs with no database, and `close()` that
+leaves no `-wal` behind. Only `@jsudc/server` is released: `@jsudc/core` and
+`@jsudc/react` stay 0.8.0 and the `@jsudc/core` range stays `^0.8.0`.
+Everything is an addition or a fix: a 0.8.0 host runs unchanged.
+
 ### Added
 
 - `@jsudc/server/testing`: `openTestApp` opens a `:memory:` or temp-file
@@ -602,7 +609,8 @@ First tagged version, installed from the GitHub tag.
 - `migrations/`: the UDC-owned SQL (`udc_schema_revisions`, the `udc_date` /
   `udc_timestamptz` casts), also run by `ensureUdcSchema`.
 
-[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/digital-cube/jsudc-server/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/digital-cube/jsudc-server/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/digital-cube/jsudc-server/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/digital-cube/jsudc-server/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/digital-cube/jsudc-server/compare/v0.5.0...v0.6.0
